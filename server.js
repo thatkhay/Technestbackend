@@ -11,6 +11,7 @@ const priceRoutes = require("./routes/prices");
 const deviceRoutes = require("./routes/devices");
 const recommendRoutes = require("./routes/recommendations");
 const authRoutes = require("./routes/auth");
+const listingRoutes = require("./routes/listings"); // ← ADD THIS
 
 const app = express();
 
@@ -24,7 +25,6 @@ const allowedOrigins = [
 app.use(
   cors({
     origin: (origin, callback) => {
-      // Allow requests with no origin (mobile apps, curl, Postman)
       if (!origin || allowedOrigins.includes(origin)) {
         callback(null, true);
       } else {
@@ -37,7 +37,7 @@ app.use(
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
 app.use(helmet());
-app.use(express.json({ limit: "10kb" })); // prevent oversized payloads
+app.use(express.json({ limit: "10kb" }));
 
 // ─── General Rate Limiter ─────────────────────────────────────────────────────
 const limiter = rateLimit({
@@ -53,6 +53,7 @@ app.use("/api/prices", priceRoutes);
 app.use("/api/devices", deviceRoutes);
 app.use("/api/recommendations", recommendRoutes);
 app.use("/api/auth", authRoutes);
+app.use("/api/listings", listingRoutes); // ← ADD THIS
 
 // ─── Health Check ─────────────────────────────────────────────────────────────
 app.get("/", (req, res) => {
