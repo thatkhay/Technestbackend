@@ -14,10 +14,11 @@ const authRoutes = require("./routes/auth");
 const listingRoutes = require("./routes/listings");
 
 const app = express();
-app.set("trust proxy", 1); 
+app.set("trust proxy", 1);
 
 const allowedOrigins = [
   process.env.CLIENT_URL,
+  "https://technest11.vercel.app",
   "http://localhost:3000",
   "http://localhost:5173",
 ].filter(Boolean);
@@ -50,7 +51,7 @@ app.use("/api/prices", priceRoutes);
 app.use("/api/devices", deviceRoutes);
 app.use("/api/recommendations", recommendRoutes);
 app.use("/api/auth", authRoutes);
-app.use("/api/listings", listingRoutes); 
+app.use("/api/listings", listingRoutes);
 
 app.get("/", (req, res) => {
   res.json({ status: "Tech Nest Intelligence API is live 🚀" });
