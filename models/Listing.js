@@ -1,66 +1,165 @@
-const mongoose = require("mongoose");
+const express = require("express");
+const Listing = require("../models/Listing");
+const { protect } = require("../middleware/auth");
+const { verifyCsrfToken } = require("../middleware/csrf");
+const router = express.Router();
 
-const ListingSchema = new mongoose.Schema(
-  {
-    userName: { type: String, required: true, trim: true, maxlength: 100 },
-    userPhone: { type: String, required: true, trim: true, maxlength: 20 },
+router.get("/", async (req, res, next) => {
+  try {
+    const { deviceCategory, listingType, status } = req.query;
 
-    deviceName: { type: String, required: true, trim: true, maxlength: 120 },
-    deviceCategory: {
-      type: String,
-      enum: ["phone", "laptop"],
-      required: true,
-    },
-    subType: {
-      type: String,
-      enum: ["iphone", "android", "macbook", "windows", "linux", "gaming"],
-      required: true,
-    },
-    storage: { type: String, trim: true, maxlength: 20 },
-    batteryHealth: { type: String, maxlength: 5 },
-    simType: {
-      type: String,
-      enum: ["physical", "esim-unlocked", "locked", null],
-      default: null,
-    },
-    faceIdStatus: {
-      type: String,
-      enum: ["working", "broken", null],
-      default: null,
-    },
-    repairs: { type: [String], default: [] },
-    mediaCount: { type: Number, default: 0, min: 0 },
-    imeiVerified: { type: Boolean, default: false },
+    const filter = { status: status || "active" };
+    if (deviceCategory) filter.deviceCategory = deviceCategory;
+    if (listingType) filter.listingType = listingType;
 
-    estimatedMin: { type: Number, required: true, min: 0 },
-    estimatedMax: { type: Number, required: true, min: 0 },
+    const listings = await Listing.find(filter)
+      .populate("owner", "name email vendorProfile")
+      .sort({ createdAt: -1 });
 
-    listingType: {
-      type: String,
-      enum: ["sell", "swap"],
-      required: true,
-      default: "sell",
-    },
-    wantedDevice: { type: String, trim: true, maxlength: 150, default: null },
+    res.json({ success: true, data: { listings } });
+  } catch (err) {
+    next(err);
+  }
+});
 
-    status: {
-      type: String,
-      enum: ["active", "sold", "swapped", "removed"],
-      default: "active",
-    },
+router.get("/:id", async (req, res, next) => {
+  try {
+    const listing = await Listing.findById(req.params.id).populate(
+      "owner",
+      "name email vendorProfile"
+    );
+    if (!listing)
+      return res
+        .status(404)
+        .json({ success: false, error: "Listing not found" });
+    res.json({ success: true, data: { listing } });
+  } catch (err) {
+    next(err);
+  }
+});
 
-    owner: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "User",
-      default: null,
-    },
-  },
-  { timestamps: true }
-);
+router.post("/", protect, verifyCsrfToken, async (req, res, next) => {
+  try {
+    const {
+      userName,
+      userPhone,
+      deviceName,
+      deviceCategory,
+      subType,
+      storage,
+      batteryHealth,
+      simType,
+      faceIdStatus,
+      repairs,
+      mediaCount,
+      imeiVerified,
+      estimatedMin,
+      estimatedMax,
+      listingType,
+      wantedDevice,
+    } = req.body;
 
-ListingSchema.index({ status: 1, createdAt: -1 });
-ListingSchema.index({ deviceCategory: 1, status: 1 });
-ListingSchema.index({ listingType: 1, status: 1 });
-ListingSchema.index({ deviceName: "text" });
+    if (
+      !userName ||
+      !userPhone ||
+      !deviceName ||
+      !deviceCategory ||
+      !subType ||
+      estimatedMin === undefined ||
+      estimatedMax === undefined
+    )
+      return res
+        .status(400)
+        .json({ success: false, error: "Missing required fields" });
 
-module.exports = mongoose.model("Listing", ListingSchema);
+    const listing = await Listing.create({
+      userName,
+      userPhone,
+      deviceName,
+      deviceCategory,
+      subType,
+      storage,
+      batteryHealth,
+      simType,
+      faceIdStatus,
+      repairs: repairs || [],
+      mediaCount: mediaCount || 0,
+      imeiVerified: !!imeiVerified,
+      estimatedMin,
+      estimatedMax,
+      listingType: listingType || "sell",
+      wantedDevice: listingType === "swap" ? wantedDevice : null,
+      owner: req.user._id,
+    });
+
+    res.status(201).json({ success: true, data: { listing } });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.patch("/:id", protect, verifyCsrfToken, async (req, res, next) => {
+  try {
+    const listing = await Listing.findById(req.params.id);
+    if (!listing)
+      return res
+        .status(404)
+        .json({ success: false, error: "Listing not found" });
+
+    if (!listing.owner || listing.owner.toString() !== req.user._id.toString())
+      return res
+        .status(403)
+        .json({ success: false, error: "Not your listing" });
+
+    const updatable = [
+      "userName",
+      "userPhone",
+      "deviceName",
+      "deviceCategory",
+      "subType",
+      "storage",
+      "batteryHealth",
+      "simType",
+      "faceIdStatus",
+      "repairs",
+      "mediaCount",
+      "imeiVerified",
+      "estimatedMin",
+      "estimatedMax",
+      "listingType",
+      "wantedDevice",
+      "status",
+    ];
+
+    for (const field of updatable) {
+      if (req.body[field] !== undefined) listing[field] = req.body[field];
+    }
+
+    await listing.save();
+    res.json({ success: true, data: { listing } });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.delete("/:id", protect, verifyCsrfToken, async (req, res, next) => {
+  try {
+    const listing = await Listing.findById(req.params.id);
+    if (!listing)
+      return res
+        .status(404)
+        .json({ success: false, error: "Listing not found" });
+
+    if (!listing.owner || listing.owner.toString() !== req.user._id.toString())
+      return res
+        .status(403)
+        .json({ success: false, error: "Not your listing" });
+
+    await listing.deleteOne();
+    res.json({ success: true, data: { message: "Listing deleted" } });
+  } catch (err) {
+    next(err);
+  }
+});
+
+module.exports = router;

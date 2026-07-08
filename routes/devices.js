@@ -1,9 +1,9 @@
 const express = require("express");
 const { Device, Gadget } = require("../models/Gadget");
 const { protect } = require("../middleware/auth");
+const { sendSuccess, sendError } = require("../utils/response");
 const router = express.Router();
 
-// Depreciation rates by condition
 const DEPRECIATION = {
   new: 0,
   "like-new": 0.05,
@@ -12,20 +12,65 @@ const DEPRECIATION = {
   poor: 0.5,
 };
 
-// GET /api/devices  —  get all devices for logged-in user
+/**
+ * @swagger
+ * /api/devices:
+ *   get:
+ *     summary: Get all devices owned by the logged-in user
+ *     tags: [Devices]
+ *     security:
+ *       - cookieAuth: []
+ *     responses:
+ *       200:
+ *         description: Devices fetched
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/SuccessResponse'
+ */
 router.get("/", protect, async (req, res, next) => {
   try {
     const devices = await Device.find({ owner: req.user._id }).populate(
       "gadget",
       "name brand currentPrice imageUrl category"
     );
-    res.json(devices);
+    sendSuccess(res, 200, "Devices fetched", { devices });
   } catch (err) {
     next(err);
   }
 });
 
-// POST /api/devices  —  register a new device
+/**
+ * @swagger
+ * /api/devices:
+ *   post:
+ *     summary: Register a new owned device
+ *     tags: [Devices]
+ *     security:
+ *       - cookieAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [gadgetId]
+ *             properties:
+ *               gadgetId: { type: string }
+ *               purchasePrice: { type: number }
+ *               purchaseDate: { type: string, format: date }
+ *               condition:
+ *                 type: string
+ *                 enum: [new, like-new, good, fair, poor]
+ *               notes: { type: string }
+ *     responses:
+ *       201:
+ *         description: Device registered
+ *       400:
+ *         description: gadgetId is required
+ *       404:
+ *         description: Gadget not found
+ */
 router.post("/", protect, async (req, res, next) => {
   try {
     const {
@@ -35,13 +80,11 @@ router.post("/", protect, async (req, res, next) => {
       condition = "good",
       notes,
     } = req.body;
-    if (!gadgetId)
-      return res.status(400).json({ error: "gadgetId is required" });
+    if (!gadgetId) return sendError(res, 400, "gadgetId is required");
 
     const gadget = await Gadget.findById(gadgetId);
-    if (!gadget) return res.status(404).json({ error: "Gadget not found" });
+    if (!gadget) return sendError(res, 404, "Gadget not found");
 
-    // Calculate estimated current value based on age + condition
     const yearsOwned = purchaseDate
       ? (Date.now() - new Date(purchaseDate)) / (1000 * 60 * 60 * 24 * 365)
       : 0;
@@ -62,35 +105,71 @@ router.post("/", protect, async (req, res, next) => {
     });
 
     await device.populate("gadget", "name brand currentPrice imageUrl");
-    res.status(201).json(device);
+    sendSuccess(res, 201, "Device registered", { device });
   } catch (err) {
     next(err);
   }
 });
 
-// GET /api/devices/:id  —  single device detail
+/**
+ * @swagger
+ * /api/devices/{id}:
+ *   get:
+ *     summary: Get a single owned device by ID
+ *     tags: [Devices]
+ *     security:
+ *       - cookieAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Device fetched
+ *       404:
+ *         description: Device not found
+ */
 router.get("/:id", protect, async (req, res, next) => {
   try {
     const device = await Device.findOne({
       _id: req.params.id,
       owner: req.user._id,
     }).populate("gadget");
-    if (!device) return res.status(404).json({ error: "Device not found" });
-    res.json(device);
+    if (!device) return sendError(res, 404, "Device not found");
+    sendSuccess(res, 200, "Device fetched", { device });
   } catch (err) {
     next(err);
   }
 });
 
-// DELETE /api/devices/:id  —  remove a device
+/**
+ * @swagger
+ * /api/devices/{id}:
+ *   delete:
+ *     summary: Remove an owned device
+ *     tags: [Devices]
+ *     security:
+ *       - cookieAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Device removed
+ *       404:
+ *         description: Device not found
+ */
 router.delete("/:id", protect, async (req, res, next) => {
   try {
     const device = await Device.findOneAndDelete({
       _id: req.params.id,
       owner: req.user._id,
     });
-    if (!device) return res.status(404).json({ error: "Device not found" });
-    res.json({ message: "Device removed" });
+    if (!device) return sendError(res, 404, "Device not found");
+    sendSuccess(res, 200, "Device removed");
   } catch (err) {
     next(err);
   }

@@ -1,28 +1,47 @@
 const express = require("express");
 const { Gadget } = require("../models/Gadget");
 const { protect } = require("../middleware/auth");
+const { sendSuccess, sendError } = require("../utils/response");
 const router = express.Router();
 
-// GET /api/recommendations?gadgetId=xxx
-// Returns cheaper or similarly-priced alternatives in the same category
+/**
+ * @swagger
+ * /api/recommendations:
+ *   get:
+ *     summary: Get cheaper or similarly-priced alternatives for a gadget
+ *     tags: [Recommendations]
+ *     security:
+ *       - cookieAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: gadgetId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Recommendations fetched
+ *       400:
+ *         description: gadgetId is required
+ *       404:
+ *         description: Gadget not found
+ */
 router.get("/", protect, async (req, res, next) => {
   try {
     const { gadgetId } = req.query;
-    if (!gadgetId)
-      return res.status(400).json({ error: "gadgetId is required" });
+    if (!gadgetId) return sendError(res, 400, "gadgetId is required");
 
     const source = await Gadget.findById(gadgetId);
-    if (!source) return res.status(404).json({ error: "Gadget not found" });
+    if (!source) return sendError(res, 404, "Gadget not found");
 
     const alternatives = await Gadget.find({
       category: source.category,
       _id: { $ne: source._id },
-      currentPrice: { $lte: source.currentPrice * 1.15 }, // within 15% or cheaper
+      currentPrice: { $lte: source.currentPrice * 1.15 },
     })
       .sort({ currentPrice: 1 })
       .limit(5);
 
-    res.json({
+    sendSuccess(res, 200, "Recommendations fetched", {
       source: {
         id: source._id,
         name: source.name,

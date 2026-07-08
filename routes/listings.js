@@ -1,9 +1,121 @@
 const express = require("express");
 const Listing = require("../models/Listing");
+const { protect } = require("../middleware/auth");
+const { verifyCsrfToken } = require("../middleware/csrf");
+const { sendSuccess, sendError } = require("../utils/response");
 const router = express.Router();
 
-// POST /api/listings
-router.post("/", async (req, res, next) => {
+/**
+ * @swagger
+ * /api/listings:
+ *   get:
+ *     summary: List active listings
+ *     tags: [Listings]
+ *     security:
+ *       - cookieAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: deviceCategory
+ *         schema: { type: string }
+ *       - in: query
+ *         name: listingType
+ *         schema: { type: string, enum: [sell, swap] }
+ *       - in: query
+ *         name: status
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Listings fetched
+ */
+router.get("/", protect, async (req, res, next) => {
+  try {
+    const { deviceCategory, listingType, status } = req.query;
+
+    const filter = { status: status || "active" };
+    if (deviceCategory) filter.deviceCategory = deviceCategory;
+    if (listingType) filter.listingType = listingType;
+
+    const listings = await Listing.find(filter)
+      .populate("owner", "name email vendorProfile")
+      .sort({ createdAt: -1 });
+
+    sendSuccess(res, 200, "Listings fetched", { listings });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * @swagger
+ * /api/listings/{id}:
+ *   get:
+ *     summary: Get a single listing by ID
+ *     tags: [Listings]
+ *     security:
+ *       - cookieAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Listing fetched
+ *       404:
+ *         description: Listing not found
+ */
+router.get("/:id", protect, async (req, res, next) => {
+  try {
+    const listing = await Listing.findById(req.params.id).populate(
+      "owner",
+      "name email vendorProfile"
+    );
+    if (!listing) return sendError(res, 404, "Listing not found");
+    sendSuccess(res, 200, "Listing fetched", { listing });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * @swagger
+ * /api/listings:
+ *   post:
+ *     summary: Create a new listing
+ *     tags: [Listings]
+ *     security:
+ *       - cookieAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [userName, userPhone, deviceName, deviceCategory, subType, estimatedMin, estimatedMax]
+ *             properties:
+ *               userName: { type: string }
+ *               userPhone: { type: string }
+ *               deviceName: { type: string }
+ *               deviceCategory: { type: string }
+ *               subType: { type: string }
+ *               storage: { type: string }
+ *               batteryHealth: { type: string }
+ *               simType: { type: string }
+ *               faceIdStatus: { type: string }
+ *               repairs: { type: array, items: { type: string } }
+ *               mediaCount: { type: number }
+ *               imeiVerified: { type: boolean }
+ *               estimatedMin: { type: number }
+ *               estimatedMax: { type: number }
+ *               listingType: { type: string, enum: [sell, swap] }
+ *               wantedDevice: { type: string }
+ *     responses:
+ *       201:
+ *         description: Listing created
+ *       400:
+ *         description: Missing required fields
+ */
+router.post("/", protect, verifyCsrfToken, async (req, res, next) => {
   try {
     const {
       userName,
@@ -24,19 +136,16 @@ router.post("/", async (req, res, next) => {
       wantedDevice,
     } = req.body;
 
-    if (!userName || !userPhone || !deviceName || !deviceCategory || !subType) {
-      return res
-        .status(400)
-        .json({
-          error:
-            "userName, userPhone, deviceName, deviceCategory and subType are required",
-        });
-    }
-    if (!estimatedMin || !estimatedMax) {
-      return res
-        .status(400)
-        .json({ error: "estimatedMin and estimatedMax are required" });
-    }
+    if (
+      !userName ||
+      !userPhone ||
+      !deviceName ||
+      !deviceCategory ||
+      !subType ||
+      estimatedMin === undefined ||
+      estimatedMax === undefined
+    )
+      return sendError(res, 400, "Missing required fields");
 
     const listing = await Listing.create({
       userName,
@@ -44,83 +153,123 @@ router.post("/", async (req, res, next) => {
       deviceName,
       deviceCategory,
       subType,
-      storage: storage || null,
-      batteryHealth: batteryHealth || null,
-      simType: simType || null,
-      faceIdStatus: faceIdStatus || null,
-      repairs: Array.isArray(repairs) ? repairs : [],
+      storage,
+      batteryHealth,
+      simType,
+      faceIdStatus,
+      repairs: repairs || [],
       mediaCount: mediaCount || 0,
-      imeiVerified: imeiVerified === true,
-      estimatedMin: Number(estimatedMin),
-      estimatedMax: Number(estimatedMax),
+      imeiVerified: !!imeiVerified,
+      estimatedMin,
+      estimatedMax,
       listingType: listingType || "sell",
-      wantedDevice: wantedDevice || null,
+      wantedDevice: listingType === "swap" ? wantedDevice : null,
+      owner: req.user._id,
     });
 
-    res.status(201).json(listing);
+    sendSuccess(res, 201, "Listing created", { listing });
   } catch (err) {
     next(err);
   }
 });
 
-// GET /api/listings
-router.get("/", async (req, res, next) => {
-  try {
-    const { category, subType, type, q, minPrice, maxPrice } = req.query;
-    const page = Math.max(1, parseInt(req.query.page) || 1);
-    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 12));
-
-    const filter = { status: "active" };
-    if (category) filter.deviceCategory = category;
-    if (subType) filter.subType = subType;
-    if (type) filter.listingType = type;
-    if (q) filter.$text = { $search: q };
-    if (minPrice || maxPrice) {
-      filter.estimatedMin = {};
-      if (minPrice) filter.estimatedMin.$gte = Number(minPrice);
-      if (maxPrice) filter.estimatedMin.$lte = Number(maxPrice);
-    }
-
-    const [listings, total] = await Promise.all([
-      Listing.find(filter)
-        .sort({ createdAt: -1 })
-        .skip((page - 1) * limit)
-        .limit(limit),
-      Listing.countDocuments(filter),
-    ]);
-
-    res.json({ listings, total, page, pages: Math.ceil(total / limit) });
-  } catch (err) {
-    next(err);
-  }
-});
-
-// GET /api/listings/:id
-router.get("/:id", async (req, res, next) => {
+/**
+ * @swagger
+ * /api/listings/{id}:
+ *   patch:
+ *     summary: Update a listing you own
+ *     tags: [Listings]
+ *     security:
+ *       - cookieAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *     responses:
+ *       200:
+ *         description: Listing updated
+ *       403:
+ *         description: Not your listing
+ *       404:
+ *         description: Listing not found
+ */
+router.patch("/:id", protect, verifyCsrfToken, async (req, res, next) => {
   try {
     const listing = await Listing.findById(req.params.id);
-    if (!listing) return res.status(404).json({ error: "Listing not found" });
-    res.json(listing);
+    if (!listing) return sendError(res, 404, "Listing not found");
+
+    if (!listing.owner || listing.owner.toString() !== req.user._id.toString())
+      return sendError(res, 403, "Not your listing");
+
+    const updatable = [
+      "userName",
+      "userPhone",
+      "deviceName",
+      "deviceCategory",
+      "subType",
+      "storage",
+      "batteryHealth",
+      "simType",
+      "faceIdStatus",
+      "repairs",
+      "mediaCount",
+      "imeiVerified",
+      "estimatedMin",
+      "estimatedMax",
+      "listingType",
+      "wantedDevice",
+      "status",
+    ];
+
+    for (const field of updatable) {
+      if (req.body[field] !== undefined) listing[field] = req.body[field];
+    }
+
+    await listing.save();
+    sendSuccess(res, 200, "Listing updated", { listing });
   } catch (err) {
     next(err);
   }
 });
 
-// PATCH /api/listings/:id/status
-router.patch("/:id/status", async (req, res, next) => {
+/**
+ * @swagger
+ * /api/listings/{id}:
+ *   delete:
+ *     summary: Delete a listing you own
+ *     tags: [Listings]
+ *     security:
+ *       - cookieAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Listing deleted
+ *       403:
+ *         description: Not your listing
+ *       404:
+ *         description: Listing not found
+ */
+router.delete("/:id", protect, verifyCsrfToken, async (req, res, next) => {
   try {
-    const { status } = req.body;
-    const allowed = ["active", "sold", "swapped", "removed"];
-    if (!allowed.includes(status)) {
-      return res.status(400).json({ error: "Invalid status" });
-    }
-    const listing = await Listing.findByIdAndUpdate(
-      req.params.id,
-      { status },
-      { new: true }
-    );
-    if (!listing) return res.status(404).json({ error: "Listing not found" });
-    res.json(listing);
+    const listing = await Listing.findById(req.params.id);
+    if (!listing) return sendError(res, 404, "Listing not found");
+
+    if (!listing.owner || listing.owner.toString() !== req.user._id.toString())
+      return sendError(res, 403, "Not your listing");
+
+    await listing.deleteOne();
+    sendSuccess(res, 200, "Listing deleted");
   } catch (err) {
     next(err);
   }

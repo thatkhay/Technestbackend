@@ -1,14 +1,46 @@
 const express = require("express");
 const { Gadget } = require("../models/Gadget");
 const { protect } = require("../middleware/auth");
+const { sendSuccess, sendError } = require("../utils/response");
 const router = express.Router();
 
-// GET /api/gadgets?q=iphone&category=smartphone&minPrice=50000&maxPrice=200000
+/**
+ * @swagger
+ * /api/gadgets:
+ *   get:
+ *     summary: Search and list gadgets
+ *     tags: [Gadgets]
+ *     parameters:
+ *       - in: query
+ *         name: q
+ *         schema: { type: string }
+ *       - in: query
+ *         name: category
+ *         schema: { type: string }
+ *       - in: query
+ *         name: minPrice
+ *         schema: { type: number }
+ *       - in: query
+ *         name: maxPrice
+ *         schema: { type: number }
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 10 }
+ *     responses:
+ *       200:
+ *         description: Gadgets fetched
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/SuccessResponse'
+ */
 router.get("/", async (req, res, next) => {
   try {
     const { q, category, minPrice, maxPrice } = req.query;
 
-    // Sanitize pagination — cap limit at 50, prevent negative pages
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 10));
 
@@ -29,7 +61,7 @@ router.get("/", async (req, res, next) => {
 
     const total = await Gadget.countDocuments(filter);
 
-    res.json({
+    sendSuccess(res, 200, "Gadgets fetched", {
       gadgets,
       total,
       page,
@@ -40,21 +72,67 @@ router.get("/", async (req, res, next) => {
   }
 });
 
-// GET /api/gadgets/:id
+/**
+ * @swagger
+ * /api/gadgets/{id}:
+ *   get:
+ *     summary: Get a single gadget by ID
+ *     tags: [Gadgets]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Gadget fetched
+ *       404:
+ *         description: Gadget not found
+ */
 router.get("/:id", async (req, res, next) => {
   try {
     const gadget = await Gadget.findById(req.params.id);
-    if (!gadget) return res.status(404).json({ error: "Gadget not found" });
-    res.json(gadget);
+    if (!gadget) return sendError(res, 404, "Gadget not found");
+    sendSuccess(res, 200, "Gadget fetched", { gadget });
   } catch (err) {
     next(err);
   }
 });
 
-// POST /api/gadgets  (protected — admin only in future)
+/**
+ * @swagger
+ * /api/gadgets:
+ *   post:
+ *     summary: Create a new gadget entry
+ *     tags: [Gadgets]
+ *     security:
+ *       - cookieAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [name, brand, currentPrice]
+ *             properties:
+ *               name: { type: string }
+ *               brand: { type: string }
+ *               category:
+ *                 type: string
+ *                 enum: [smartphone, laptop, tablet, wearable, accessory, other]
+ *               currentPrice: { type: number }
+ *               currency: { type: string }
+ *               specs: { type: object }
+ *               imageUrl: { type: string }
+ *               tags: { type: array, items: { type: string } }
+ *     responses:
+ *       201:
+ *         description: Gadget created
+ *       400:
+ *         description: Missing required fields
+ */
 router.post("/", protect, async (req, res, next) => {
   try {
-    // Whitelist only allowed fields — never pass raw req.body to DB
     const {
       name,
       brand,
@@ -67,9 +145,7 @@ router.post("/", protect, async (req, res, next) => {
     } = req.body;
 
     if (!name || !brand || !currentPrice)
-      return res
-        .status(400)
-        .json({ error: "name, brand, and currentPrice are required" });
+      return sendError(res, 400, "name, brand, and currentPrice are required");
 
     const gadget = await Gadget.create({
       name,
@@ -82,7 +158,7 @@ router.post("/", protect, async (req, res, next) => {
       tags,
     });
 
-    res.status(201).json(gadget);
+    sendSuccess(res, 201, "Gadget created", { gadget });
   } catch (err) {
     next(err);
   }
