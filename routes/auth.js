@@ -15,10 +15,14 @@ const authLimiter = rateLimit({
     sendError(res, 429, "Too many attempts, please try again later."),
 });
 
+// sameSite "strict" was blocking the cookie on every cross-origin request
+// (frontend on :3000, backend on :5000 = different origins). "lax" allows
+// it in dev; "none" (+ secure) is needed in prod if frontend/backend are
+// on different domains, e.g. Vercel frontend -> separate API host.
 const cookieBaseOptions = {
   httpOnly: true,
   secure: process.env.NODE_ENV === "production",
-  sameSite: "strict",
+  sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
 };
 
 const signAccessToken = (id, userType) =>
