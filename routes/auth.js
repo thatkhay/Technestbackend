@@ -15,24 +15,39 @@ const authLimiter = rateLimit({
     sendError(res, 429, "Too many attempts, please try again later."),
 });
 
-// sameSite "strict" was blocking the cookie on every cross-origin request
-// (frontend on :3000, backend on :5000 = different origins). "lax" allows
-// it in dev; "none" (+ secure) is needed in prod if frontend/backend are
-// on different domains, e.g. Vercel frontend -> separate API host.
+// Requests now arrive via the Next.js rewrite proxy (see next.config.ts),
+// so from the browser's perspective every request is same-origin. That
+// makes these cookies first-party, so plain "lax" works in both dev and prod.
 const cookieBaseOptions = {
   httpOnly: true,
   secure: process.env.NODE_ENV === "production",
-  sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+  sameSite: "lax",
 };
 
-const signAccessToken = (id, userType) =>
-  jwt.sign({ id, userType }, process.env.JWT_SECRET, { expiresIn: "2d" });
+// vendorVerified is included in the token so the frontend's middleware.ts
+// can gate /dashboard on it without a DB round trip. Whenever
+// vendorVerified changes (see routes/vendor.js /verify), the token must be
+// re-signed via /api/auth/refresh for that change to actually take effect
+// client-side — the DB value alone isn't enough since middleware only
+// reads the token.
+const signAccessToken = (id, userType, vendorVerified) =>
+  jwt.sign(
+    { id, userType, vendorVerified: !!vendorVerified },
+    process.env.JWT_SECRET,
+    {
+      expiresIn: "2d",
+    }
+  );
 
 const signRefreshToken = (id) =>
   jwt.sign({ id }, process.env.JWT_REFRESH_SECRET, { expiresIn: "7d" });
 
 const setAuthCookies = (res, user) => {
-  const accessToken = signAccessToken(user._id, user.userType);
+  const accessToken = signAccessToken(
+    user._id,
+    user.userType,
+    user.vendorVerified
+  );
   const refreshToken = signRefreshToken(user._id);
 
   res.cookie("accessToken", accessToken, {
@@ -124,6 +139,7 @@ router.post(
           email: user.email,
           userType: user.userType,
           isVerified: user.isVerified,
+          vendorVerified: user.vendorVerified,
         },
       });
     } catch (err) {
@@ -185,6 +201,7 @@ router.post("/login", authLimiter, issueCsrfToken, async (req, res, next) => {
         email: user.email,
         userType: user.userType,
         isVerified: user.isVerified,
+        vendorVerified: user.vendorVerified,
       },
     });
   } catch (err) {
@@ -264,7 +281,11 @@ router.post("/refresh", async (req, res) => {
     const user = await User.findById(decoded.id).select("-password");
     if (!user) return sendError(res, 401, "User no longer exists");
 
-    const accessToken = signAccessToken(user._id, user.userType);
+    const accessToken = signAccessToken(
+      user._id,
+      user.userType,
+      user.vendorVerified
+    );
     res.cookie("accessToken", accessToken, {
       ...cookieBaseOptions,
       maxAge: 2 * 24 * 60 * 60 * 1000,
