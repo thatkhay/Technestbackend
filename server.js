@@ -17,6 +17,7 @@ const authRoutes = require("./routes/auth");
 const listingRoutes = require("./routes/listings");
 const vendorRoutes = require("./routes/vendor");
 const meRoutes = require("./routes/me");
+const adminRoutes = require("./routes/admin");
 const swaggerUi = require("swagger-ui-express");
 const swaggerSpec = require("./config/swagger");
 
