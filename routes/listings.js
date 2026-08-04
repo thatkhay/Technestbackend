@@ -2,32 +2,9 @@ const express = require("express");
 const Listing = require("../models/Listing");
 const { protect } = require("../middleware/auth");
 const { verifyCsrfToken } = require("../middleware/csrf");
-const { sendSuccess, sendError } = require("../utils/response");
 const router = express.Router();
 
-/**
- * @swagger
- * /api/listings:
- *   get:
- *     summary: List active listings
- *     tags: [Listings]
- *     security:
- *       - cookieAuth: []
- *     parameters:
- *       - in: query
- *         name: deviceCategory
- *         schema: { type: string }
- *       - in: query
- *         name: listingType
- *         schema: { type: string, enum: [sell, swap] }
- *       - in: query
- *         name: status
- *         schema: { type: string }
- *     responses:
- *       200:
- *         description: Listings fetched
- */
-router.get("/", protect, async (req, res, next) => {
+router.get("/", async (req, res, next) => {
   try {
     const { deviceCategory, listingType, status } = req.query;
 
@@ -39,82 +16,28 @@ router.get("/", protect, async (req, res, next) => {
       .populate("owner", "name email vendorProfile")
       .sort({ createdAt: -1 });
 
-    sendSuccess(res, 200, "Listings fetched", { listings });
+    res.json({ success: true, data: { listings } });
   } catch (err) {
     next(err);
   }
 });
 
-/**
- * @swagger
- * /api/listings/{id}:
- *   get:
- *     summary: Get a single listing by ID
- *     tags: [Listings]
- *     security:
- *       - cookieAuth: []
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema: { type: string }
- *     responses:
- *       200:
- *         description: Listing fetched
- *       404:
- *         description: Listing not found
- */
-router.get("/:id", protect, async (req, res, next) => {
+router.get("/:id", async (req, res, next) => {
   try {
     const listing = await Listing.findById(req.params.id).populate(
       "owner",
       "name email vendorProfile"
     );
-    if (!listing) return sendError(res, 404, "Listing not found");
-    sendSuccess(res, 200, "Listing fetched", { listing });
+    if (!listing)
+      return res
+        .status(404)
+        .json({ success: false, error: "Listing not found" });
+    res.json({ success: true, data: { listing } });
   } catch (err) {
     next(err);
   }
 });
 
-/**
- * @swagger
- * /api/listings:
- *   post:
- *     summary: Create a new listing
- *     tags: [Listings]
- *     security:
- *       - cookieAuth: []
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [userName, userPhone, deviceName, deviceCategory, subType, estimatedMin, estimatedMax]
- *             properties:
- *               userName: { type: string }
- *               userPhone: { type: string }
- *               deviceName: { type: string }
- *               deviceCategory: { type: string }
- *               subType: { type: string }
- *               storage: { type: string }
- *               batteryHealth: { type: string }
- *               simType: { type: string }
- *               faceIdStatus: { type: string }
- *               repairs: { type: array, items: { type: string } }
- *               mediaCount: { type: number }
- *               imeiVerified: { type: boolean }
- *               estimatedMin: { type: number }
- *               estimatedMax: { type: number }
- *               listingType: { type: string, enum: [sell, swap] }
- *               wantedDevice: { type: string }
- *     responses:
- *       201:
- *         description: Listing created
- *       400:
- *         description: Missing required fields
- */
 router.post("/", protect, verifyCsrfToken, async (req, res, next) => {
   try {
     const {
@@ -129,6 +52,7 @@ router.post("/", protect, verifyCsrfToken, async (req, res, next) => {
       faceIdStatus,
       repairs,
       mediaCount,
+      images,
       imeiVerified,
       estimatedMin,
       estimatedMax,
@@ -145,7 +69,15 @@ router.post("/", protect, verifyCsrfToken, async (req, res, next) => {
       estimatedMin === undefined ||
       estimatedMax === undefined
     )
-      return sendError(res, 400, "Missing required fields");
+      return res
+        .status(400)
+        .json({ success: false, error: "Missing required fields" });
+
+    // images should just be Cloudinary secure_urls — cap defensively even
+    // though the frontend already limits to 10, since this is untrusted input
+    const safeImages = Array.isArray(images)
+      ? images.filter((u) => typeof u === "string").slice(0, 10)
+      : [];
 
     const listing = await Listing.create({
       userName,
@@ -159,56 +91,38 @@ router.post("/", protect, verifyCsrfToken, async (req, res, next) => {
       faceIdStatus,
       repairs: repairs || [],
       mediaCount: mediaCount || 0,
+      images: safeImages,
       imeiVerified: !!imeiVerified,
       estimatedMin,
       estimatedMax,
       listingType: listingType || "sell",
       wantedDevice: listingType === "swap" ? wantedDevice : null,
       owner: req.user._id,
+      // status defaults to "pending_review" from the schema — new
+      // listings are invisible on the public marketplace until an admin
+      // approves them
     });
 
-    sendSuccess(res, 201, "Listing created", { listing });
+    res.status(201).json({ success: true, data: { listing } });
   } catch (err) {
     next(err);
   }
 });
 
-/**
- * @swagger
- * /api/listings/{id}:
- *   patch:
- *     summary: Update a listing you own
- *     tags: [Listings]
- *     security:
- *       - cookieAuth: []
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema: { type: string }
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *     responses:
- *       200:
- *         description: Listing updated
- *       403:
- *         description: Not your listing
- *       404:
- *         description: Listing not found
- */
 router.patch("/:id", protect, verifyCsrfToken, async (req, res, next) => {
   try {
     const listing = await Listing.findById(req.params.id);
-    if (!listing) return sendError(res, 404, "Listing not found");
+    if (!listing)
+      return res
+        .status(404)
+        .json({ success: false, error: "Listing not found" });
 
     if (!listing.owner || listing.owner.toString() !== req.user._id.toString())
-      return sendError(res, 403, "Not your listing");
+      return res
+        .status(403)
+        .json({ success: false, error: "Not your listing" });
 
-    const updatable = [
+    const contentFields = [
       "userName",
       "userPhone",
       "deviceName",
@@ -220,56 +134,61 @@ router.patch("/:id", protect, verifyCsrfToken, async (req, res, next) => {
       "faceIdStatus",
       "repairs",
       "mediaCount",
+      "images",
       "imeiVerified",
       "estimatedMin",
       "estimatedMax",
       "listingType",
       "wantedDevice",
-      "status",
     ];
 
-    for (const field of updatable) {
+    for (const field of contentFields) {
       if (req.body[field] !== undefined) listing[field] = req.body[field];
     }
 
+    // Editing listing content sends it back through moderation rather than
+    // letting an owner slip changes past review on an already-approved
+    // listing.
+    if (contentFields.some((f) => req.body[f] !== undefined)) {
+      listing.status = "pending_review";
+      listing.rejectionReason = null;
+    }
+
+    // Status transitions like marking sold/swapped/removed stay entirely
+    // owner-controlled and don't need re-review — only admin-gated
+    // transitions (pending_review/rejected → active) require the separate
+    // admin approve/reject routes.
+    const ownerSettableStatuses = ["active", "sold", "swapped", "removed"];
+    if (
+      req.body.status !== undefined &&
+      ownerSettableStatuses.includes(req.body.status) &&
+      listing.status !== "pending_review"
+    ) {
+      listing.status = req.body.status;
+    }
+
     await listing.save();
-    sendSuccess(res, 200, "Listing updated", { listing });
+    res.json({ success: true, data: { listing } });
   } catch (err) {
     next(err);
   }
 });
 
-/**
- * @swagger
- * /api/listings/{id}:
- *   delete:
- *     summary: Delete a listing you own
- *     tags: [Listings]
- *     security:
- *       - cookieAuth: []
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema: { type: string }
- *     responses:
- *       200:
- *         description: Listing deleted
- *       403:
- *         description: Not your listing
- *       404:
- *         description: Listing not found
- */
 router.delete("/:id", protect, verifyCsrfToken, async (req, res, next) => {
   try {
     const listing = await Listing.findById(req.params.id);
-    if (!listing) return sendError(res, 404, "Listing not found");
+    if (!listing)
+      return res
+        .status(404)
+        .json({ success: false, error: "Listing not found" });
 
     if (!listing.owner || listing.owner.toString() !== req.user._id.toString())
-      return sendError(res, 403, "Not your listing");
+      return res
+        .status(403)
+        .json({ success: false, error: "Not your listing" });
 
     await listing.deleteOne();
-    sendSuccess(res, 200, "Listing deleted");
+    res.json({ success: true, data: { message: "Listing deleted" } });
   } catch (err) {
     next(err);
   }

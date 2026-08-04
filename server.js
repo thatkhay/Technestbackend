@@ -18,6 +18,8 @@ const listingRoutes = require("./routes/listings");
 const vendorRoutes = require("./routes/vendor");
 const meRoutes = require("./routes/me");
 const adminRoutes = require("./routes/admin");
+const uploadRoutes = require("./routes/uploads");
+const notificationRoutes = require("./routes/notifications");
 const swaggerUi = require("swagger-ui-express");
 const swaggerSpec = require("./config/swagger");
 
@@ -34,6 +36,17 @@ if (
 ) {
   console.error(
     "JWT_REFRESH_SECRET is missing or too short. Set a random 32+ character string in .env"
+  );
+  process.exit(1);
+}
+
+if (
+  !process.env.CLOUDINARY_CLOUD_NAME ||
+  !process.env.CLOUDINARY_API_KEY ||
+  !process.env.CLOUDINARY_API_SECRET
+) {
+  console.error(
+    "Cloudinary env vars missing. Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET in .env"
   );
   process.exit(1);
 }
@@ -84,6 +97,8 @@ app.use("/api/listings", listingRoutes);
 app.use("/api/vendors", vendorRoutes);
 app.use("/api/me", meRoutes);
 app.use("/api/admin", adminRoutes);
+app.use("/api/uploads", uploadRoutes);
+app.use("/api/notifications", notificationRoutes);
 app.use("/api/docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
 app.get("/", (req, res) => {
