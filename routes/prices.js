@@ -1,6 +1,6 @@
 const express = require("express");
 const { Gadget } = require("../models/Gadget");
-const { protect } = require("../middleware/auth");
+const { protect, restrictTo } = require("../middleware/auth");
 const { sendSuccess, sendError } = require("../utils/response");
 const router = express.Router();
 
@@ -63,29 +63,34 @@ router.get("/:gadgetId", async (req, res, next) => {
  *       404:
  *         description: Gadget not found
  */
-router.patch("/:gadgetId", protect, async (req, res, next) => {
-  try {
-    const { price } = req.body;
+router.patch(
+  "/:gadgetId",
+  protect,
+  restrictTo("admin"),
+  async (req, res, next) => {
+    try {
+      const { price } = req.body;
 
-    if (!price || isNaN(price) || Number(price) <= 0)
-      return sendError(res, 400, "A valid price is required");
+      if (!price || isNaN(price) || Number(price) <= 0)
+        return sendError(res, 400, "A valid price is required");
 
-    const gadget = await Gadget.findById(req.params.gadgetId);
-    if (!gadget) return sendError(res, 404, "Gadget not found");
+      const gadget = await Gadget.findById(req.params.gadgetId);
+      if (!gadget) return sendError(res, 404, "Gadget not found");
 
-    gadget.priceHistory.push({
-      price: gadget.currentPrice,
-      recordedAt: new Date(),
-    });
-    gadget.currentPrice = Number(price);
-    await gadget.save();
+      gadget.priceHistory.push({
+        price: gadget.currentPrice,
+        recordedAt: new Date(),
+      });
+      gadget.currentPrice = Number(price);
+      await gadget.save();
 
-    sendSuccess(res, 200, "Price updated", {
-      currentPrice: gadget.currentPrice,
-    });
-  } catch (err) {
-    next(err);
+      sendSuccess(res, 200, "Price updated", {
+        currentPrice: gadget.currentPrice,
+      });
+    } catch (err) {
+      next(err);
+    }
   }
-});
+);
 
 module.exports = router;

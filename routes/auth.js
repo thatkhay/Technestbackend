@@ -113,8 +113,8 @@ router.post(
       if (!emailRegex.test(email))
         return sendError(res, 400, "Invalid email format");
 
-      if (password.length < 6)
-        return sendError(res, 400, "Password must be at least 6 characters");
+      if (password.length < 8)
+        return sendError(res, 400, "Password must be at least 8 characters");
 
       const publicTypes = ["user", "vendor"];
       const resolvedType = publicTypes.includes(userType) ? userType : "user";

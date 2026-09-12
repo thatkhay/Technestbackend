@@ -1,6 +1,6 @@
 const express = require("express");
 const { Gadget } = require("../models/Gadget");
-const { protect } = require("../middleware/auth");
+const { protect, restrictTo } = require("../middleware/auth");
 const { sendSuccess, sendError } = require("../utils/response");
 const router = express.Router();
 
@@ -131,7 +131,7 @@ router.get("/:id", async (req, res, next) => {
  *       400:
  *         description: Missing required fields
  */
-router.post("/", protect, async (req, res, next) => {
+router.post("/", protect, restrictTo("admin"), async (req, res, next) => {
   try {
     const {
       name,

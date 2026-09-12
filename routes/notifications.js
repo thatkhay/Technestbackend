@@ -74,7 +74,18 @@ router.patch("/", protect, verifyCsrfToken, async (req, res, next) => {
       return sendSuccess(res, 200, "All notifications marked read");
     }
 
-    const notif = await Notification.findById(id);
+    const orClauses = [
+      { recipientType: "all_users" },
+      { recipientType: "specific", recipient: req.user._id },
+    ];
+    if (req.user.userType === "vendor") {
+      orClauses.push({ recipientType: "all_vendors" });
+    }
+
+    const notif = await Notification.findOne({
+      _id: id,
+      $or: orClauses,
+    });
     if (!notif) return sendError(res, 404, "Notification not found");
 
     notif.read = true;
