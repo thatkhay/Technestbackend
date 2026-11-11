@@ -48,6 +48,14 @@ const UserSchema = new mongoose.Schema(
       // ids from data/repairs.json, for repairers
       repairServices: { type: [String], default: undefined },
     },
+    // Where the vendor application stands. Profiles from before this field
+    // existed have none; vendorApplicationView() works it out for them.
+    vendorApplication: {
+      status: { type: String, enum: ["submitted", "approved", "rejected"] },
+      submittedAt: Date,
+      reviewedAt: Date,
+      rejectionReason: String,
+    },
     // Private: CAC certificate upload (Cloudinary public_id, authenticated)
     vendorDocuments: {
       cacCertificateId: { type: String, default: null },
@@ -101,6 +109,27 @@ UserSchema.pre("save", async function () {
   if (!this.isModified("password")) return;
   this.password = await bcrypt.hash(this.password, 12);
 });
+
+/**
+ * { status: not_started | submitted | approved | rejected, submittedAt,
+ *   reviewedAt, rejectionReason } for GET /api/me and the vendor home card.
+ */
+UserSchema.methods.vendorApplicationView = function () {
+  const a = this.vendorApplication || {};
+  const status = this.vendorVerified
+    ? "approved"
+    : this.vendorProfile?.phone
+    ? "submitted"
+    : a.status === "rejected"
+    ? "rejected"
+    : "not_started";
+  return {
+    status,
+    submittedAt: status === "not_started" ? null : a.submittedAt || null,
+    reviewedAt: status === "approved" || status === "rejected" ? a.reviewedAt || null : null,
+    rejectionReason: status === "rejected" ? a.rejectionReason || null : null,
+  };
+};
 
 UserSchema.methods.matchPassword = function (entered) {
   return bcrypt.compare(entered, this.password);

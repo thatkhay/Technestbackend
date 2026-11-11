@@ -564,6 +564,163 @@ section("stock counts", async ({ C, db }) => {
   t("bulk upload: stock column (0 → out of stock); bad value rejected", sc.stockQuantity === 0 && sc.inStock === false && r.json.data.failed === 1, J(r.json.data));
 });
 
+// ── Mobile UI requests: product images/ratings, catalog filters, flash-sale
+//    cap, vendor application status, admin document review, vendor summary,
+//    rate limits ─────────────────────────────────────────────────────────
+section("mobile UI requests", async ({ C, db, ids, Client }) => {
+  const oid = (x) => new ctx.mongoose.Types.ObjectId(String(x));
+  const guest = () => new Client();
+
+  // Images on every product, gadgets included
+  let r = await C.admin.req("POST", "/api/products", { slug: "pixel-buds", type: "gadget", name: "Pixel Buds Pro", brand: "Google", category: "headphones", priceUkUsed: 90000, priceBrandNew: 150000, image: "https://res.cloudinary.com/testcloud/image/upload/buds.jpg", images: ["https://res.cloudinary.com/testcloud/image/upload/buds2.jpg"] });
+  t("gadget created with images", r.status === 201, J(r.json));
+  r = await guest().req("GET", "/api/products/pixel-buds");
+  const buds = r.json.data.product;
+  t("gadgets return image + images; rating null before any review", /buds\.jpg$/.test(buds.image) && buds.images.length === 1 && buds.rating === null, J(buds));
+
+  // Catalog filters and sorting
+  await C.admin.req("POST", "/api/products", { slug: "galaxy-s24", type: "phone", name: "Galaxy S24", brand: "Samsung", category: "flagship", priceUkUsed: 700000, priceBrandNew: 900000, storage: ["128GB", "256GB"], colors: ["Onyx Black", "Cobalt Violet"] });
+  await C.admin.req("POST", "/api/products", { slug: "galaxy-a55", type: "phone", name: "Galaxy A55", brand: "Samsung", category: "mid-range", priceUkUsed: 300000, priceBrandNew: 400000, storage: ["128GB"], colors: ["Awesome Navy"] });
+  r = await guest().req("GET", "/api/products?storage=256gb");
+  t("storage filter (any case)", r.json.data.products.map((p) => p.id).join() === "galaxy-s24", J(r.json.data.products.map((p) => p.id)));
+  r = await guest().req("GET", "/api/products?color=awesome%20navy,onyx%20black&brand=Samsung");
+  t("color filter, any of", r.json.data.total === 2);
+  r = await guest().req("GET", "/api/products?sort=newest&limit=2&page=1");
+  t("sort=newest + paging", r.json.data.products[0].id === "galaxy-a55" && r.json.data.products.length === 2 && r.json.data.pages >= 2, J(r.json.data.products.map((p) => p.id)));
+
+  // Product ratings from completed catalog orders
+  const rater = new Client();
+  await rater.req("POST", "/api/auth/register", { name: "Rita Rater", email: "rater@t.com", password: "password123" });
+  await db.collection("users").updateOne({ email: "rater@t.com" }, { $set: { isVerified: true } });
+  const raterId = (await db.collection("users").findOne({ email: "rater@t.com" }))._id;
+  r = await rater.req("POST", "/api/order-requests", { buyerPhone: "08035550000", items: [{ itemId: "galaxy-s24" }, { itemId: "pixel-buds" }] });
+  const wa = r.json.data.request;
+  r = await rater.req("POST", "/api/reviews", { source: { type: "order_request", id: wa.id, productId: "galaxy-s24" }, rating: 5 });
+  t("can't rate a product before the order is completed", r.status === 409, J(r.json));
+  await C.admin.req("PATCH", `/api/admin/order-requests/${wa.id}`, { status: "in_progress" });
+  await C.admin.req("PATCH", `/api/admin/order-requests/${wa.id}`, { status: "completed" });
+  r = await rater.req("GET", "/api/reviews/pending");
+  const pDeals = r.json.data.deals.filter((d) => d.product);
+  t("each product in a completed order is reviewable", pDeals.length === 2 && pDeals.every((d) => d.type === "order_request" && d.id === wa.id) && pDeals.some((d) => d.product.id === "pixel-buds" && d.product.image), J(r.json.data.deals));
+  r = await rater.req("POST", "/api/reviews", { source: { type: "order_request", id: wa.id, productId: "galaxy-s24" }, rating: 4, comment: "Great phone" });
+  t("buyer rates a product", r.status === 201, J(r.json));
+  r = await rater.req("POST", "/api/reviews", { source: { type: "order_request", id: wa.id, productId: "pixel-buds" }, rating: 5 });
+  t("…and the other product in the same order", r.status === 201, J(r.json));
+  r = await rater.req("POST", "/api/reviews", { source: { type: "order_request", id: wa.id, productId: "galaxy-s24" }, rating: 1 });
+  t("once per product per order", r.status === 409);
+  r = await rater.req("POST", "/api/reviews", { source: { type: "order_request", id: wa.id, productId: "galaxy-a55" }, rating: 1 });
+  t("can't rate a product that wasn't in the order", r.status === 404);
+  r = await C.other.req("POST", "/api/reviews", { source: { type: "order_request", id: wa.id, productId: "galaxy-s24" }, rating: 1 });
+  t("someone else can't rate your order", r.status === 404);
+  // A Paystack order, paid and delivered
+  const paid = await db.collection("orders").insertOne({ buyer: raterId, kind: "cart", items: [{ itemId: "galaxy-s24", itemType: "phone", name: "Galaxy S24", condition: "uk-used", unitPrice: 700000, quantity: 1 }], amount: 700000, buyerName: "Rita", buyerEmail: "rater@t.com", buyerPhone: "08035550000", deliveryAddress: "x", status: "paid", fulfillmentStatus: "shipped", createdAt: new Date(), updatedAt: new Date() });
+  r = await rater.req("POST", "/api/reviews", { source: { type: "order", id: String(paid.insertedId), productId: "galaxy-s24" }, rating: 3 });
+  t("paid but not delivered → not yet", r.status === 409 && /delivered/.test(r.json.message), J(r.json));
+  await db.collection("orders").updateOne({ _id: paid.insertedId }, { $set: { fulfillmentStatus: "delivered" } });
+  r = await rater.req("POST", "/api/reviews", { source: { type: "order", id: String(paid.insertedId), productId: "galaxy-s24" }, rating: 3 });
+  t("delivered online order → rateable", r.status === 201, J(r.json));
+  r = await guest().req("GET", "/api/products?brand=Samsung");
+  const s24 = r.json.data.products.find((p) => p.id === "galaxy-s24");
+  t("products carry rating { average, count }", s24.rating.average === 3.5 && s24.rating.count === 2, J(s24.rating));
+  r = await guest().req("GET", "/api/products?sort=rating&limit=1");
+  t("sort=rating", r.json.data.products[0].id === "pixel-buds", J(r.json.data.products.map((p) => p.id)));
+  r = await guest().req("GET", "/api/reviews/products/galaxy-s24");
+  t("public product reviews", r.json.data.average === 3.5 && r.json.data.count === 2 && r.json.data.stars["4"] === 1 && r.json.data.reviews.some((x) => x.comment === "Great phone"), J(r.json.data));
+  const low = await db.collection("reviews").findOne({ product: { $ne: null }, rating: 3 });
+  await C.admin.req("PATCH", `/api/reviews/admin/${low._id}`, { status: "hidden" });
+  r = await guest().req("GET", "/api/products/galaxy-s24");
+  t("hiding a review updates the product's rating", r.json.data.product.rating.average === 4 && r.json.data.product.rating.count === 1, J(r.json.data.product.rating));
+  r = await guest().req("GET", "/api/products/flash-sale");
+  t("flash-sale and search responses carry rating too", Array.isArray(r.json.data.products));
+
+  // Flash sale capped at 2 units
+  const endsAt = new Date(Date.now() + 864e5).toISOString();
+  r = await C.admin.req("PATCH", "/api/products/galaxy-a55", { sale: { priceUkUsed: 250000, endsAt, stockLimit: 0 } });
+  t("stockLimit must be ≥ 1", r.status === 400);
+  r = await C.admin.req("PATCH", "/api/products/galaxy-a55", { sale: { priceUkUsed: 250000, endsAt, stockLimit: 2 } });
+  t("sale with a unit cap", r.json.data.product.sale.active === true && r.json.data.product.sale.stockLimit === 2 && r.json.data.product.sale.sold === 0, J(r.json.data.product.sale));
+  r = await guest().req("POST", "/api/order-requests", { buyerName: "G", buyerPhone: "08035550000", items: [{ itemId: "galaxy-a55", quantity: 3 }] });
+  t("can't order more than the sale has left", r.status === 409 && /Only 2 Galaxy A55 left at the Flash Sale price/.test(r.json.message), J(r.json));
+  r = await guest().req("POST", "/api/order-requests", { buyerName: "G", buyerPhone: "08035550000", items: [{ itemId: "galaxy-a55", quantity: 3, condition: "brand-new" }] });
+  t("…but the uncapped normal-price condition is fine", r.status === 201, J(r.json));
+  r = await guest().req("POST", "/api/order-requests", { buyerName: "G", buyerPhone: "08035550000", items: [{ itemId: "galaxy-a55", quantity: 2 }] });
+  const saleOrder = r.json.data.request;
+  t("sale price charged", saleOrder.items[0].unitPrice === 250000);
+  await C.admin.req("PATCH", `/api/admin/order-requests/${saleOrder.id}`, { status: "in_progress" });
+  await C.admin.req("PATCH", `/api/admin/order-requests/${saleOrder.id}`, { status: "completed" });
+  r = await guest().req("GET", "/api/products/galaxy-a55");
+  t("completed sale counts; sale ends when the cap is reached", r.json.data.product.sale.sold === 2 && r.json.data.product.sale.active === false, J(r.json.data.product.sale));
+  r = await guest().req("GET", "/api/products/flash-sale");
+  t("sold-out sale leaves the flash-sale page", !r.json.data.products.some((p) => p.id === "galaxy-a55"));
+  r = await guest().req("GET", "/api/products?onSale=true");
+  t("…and the onSale filter", !r.json.data.products.some((p) => p.id === "galaxy-a55"));
+  r = await guest().req("POST", "/api/order-requests", { buyerName: "G", buyerPhone: "08035550000", items: [{ itemId: "galaxy-a55" }] });
+  t("normal price again after the cap", r.json.data.request.items[0].unitPrice === 300000, J(r.json));
+  r = await C.admin.req("POST", "/api/products/flash-sale", { slugs: ["galaxy-s24"], percentOff: 10, startsAt: new Date(Date.now() + 864e5).toISOString(), endsAt: new Date(Date.now() + 2 * 864e5).toISOString(), stockLimit: 5 });
+  r = await guest().req("GET", "/api/products/flash-sale");
+  const up = r.json.data.upcoming.find((p) => p.id === "galaxy-s24");
+  t("upcoming sales show their price and cap in advance", up?.sale.priceUkUsed === 630000 && up.sale.stockLimit === 5 && up.sale.sold === 0, J(up));
+
+  // Vendor application status
+  const shop = new Client();
+  await shop.req("POST", "/api/auth/register", { name: "Shop Keeper", email: "shop@t.com", password: "password123" });
+  await db.collection("users").updateOne({ email: "shop@t.com" }, { $set: { isVerified: true } });
+  const shopId = (await db.collection("users").findOne({ email: "shop@t.com" }))._id;
+  r = await shop.req("GET", "/api/me");
+  t("vendorApplication: not_started", r.json.data.vendorApplication.status === "not_started", J(r.json.data));
+  await shop.req("PATCH", "/api/vendor/upgrade");
+  const application = { phone: "08031119999", businessRegNumber: "RC77", shopAddress: "Ikeja", businessName: "Keeper Gadgets", cacCertificateId: `technest/private/${shopId}/cac-pdf` };
+  r = await shop.req("PATCH", "/api/vendor/verify", application);
+  t("submitting → submitted (in the reply too)", r.json.data.vendorApplication.status === "submitted" && r.json.data.vendorApplication.submittedAt, J(r.json));
+  await db.collection("users").updateOne({ _id: shopId }, { $set: { identity: { status: "pending", fullName: "Shop Keeper", idType: "nin_slip", idDocumentId: `technest/private/${shopId}/id`, selfieId: `technest/private/${shopId}/selfie-missing`, nameMatch: "match", submittedAt: new Date(), bankCode: "058" } } });
+
+  // Admin document review in one call
+  r = await C.admin.req("GET", "/api/admin/vendors/pending");
+  const pv = r.json.data.vendors.find((v) => v.email === "shop@t.com");
+  t("pending vendor: CAC link + file type", pv && /\.pdf\?|\.pdf$/.test(pv.cacCertificateUrl.split("/").pop()) && pv.cacCertificateMime === "application/pdf", J(pv));
+  t("pending vendor: identity with ID/selfie links and types", pv.identity?.status === "pending" && pv.identity.idType === "nin_slip" && pv.identity.fullName === "Shop Keeper" && pv.identity.idDocumentUrl && pv.identity.idDocumentMime === "image/jpeg" && pv.identity.selfieUrl && pv.identity.selfieMime === null && pv.identity.submittedAt && pv.identity.bankCode === undefined && pv.identity.idDocumentId === undefined && pv.vendorDocuments === undefined, J(pv?.identity));
+  r = await C.admin.req("GET", `/api/admin/identity/${shopId}`);
+  t("GET /api/admin/identity/{userId}", r.status === 200 && r.json.data.identity.idDocumentMime === "image/jpeg" && r.json.data.email === "shop@t.com", J(r.json));
+  r = await C.admin.req("GET", `/api/admin/identity/${ids.other}`);
+  t("…null when they never submitted", r.status === 200 && r.json.data.identity === null);
+  r = await C.buyer.req("GET", `/api/admin/identity/${shopId}`);
+  t("…admins only", r.status === 403);
+
+  await C.admin.req("PATCH", `/api/admin/vendors/${shopId}/reject`, { reason: "CAC certificate is blurry" });
+  r = await shop.req("GET", "/api/me");
+  t("rejected + reason (profile cleared)", r.json.data.vendorApplication.status === "rejected" && r.json.data.vendorApplication.rejectionReason === "CAC certificate is blurry" && !r.json.data.vendorProfile?.phone, J(r.json.data.vendorApplication));
+  await shop.req("PATCH", "/api/vendor/verify", application);
+  r = await shop.req("GET", "/api/me");
+  t("resubmitting → submitted, old reason gone", r.json.data.vendorApplication.status === "submitted" && r.json.data.vendorApplication.rejectionReason === null);
+  await C.admin.req("PATCH", `/api/admin/vendors/${shopId}/approve`);
+  r = await shop.req("GET", "/api/me");
+  t("approved", r.json.data.vendorApplication.status === "approved" && r.json.data.vendorApplication.reviewedAt);
+  r = await C.v1.req("GET", "/api/me");
+  t("vendors from before the field: approved", r.json.data.vendorApplication.status === "approved");
+
+  // Vendor home-card summary
+  r = await C.v1.req("GET", "/api/vendor/summary");
+  const sm = r.json?.data;
+  t("vendor summary", r.status === 200 && ["newRequests", "pendingOrders", "unreadNotifications", "activeListings"].every((k) => Number.isInteger(sm[k])) && sm.rating.count >= 1 && sm.pendingOrders === sm.pendingOrdersBreakdown.wonRequests + sm.pendingOrdersBreakdown.listingOrders && !("listings" in sm), J(r.json));
+  const open = await db.collection("devicerequests").countDocuments({ matchedVendors: oid(ids.v1), status: "open", expiresAt: { $gt: new Date() }, "offers.vendor": { $ne: oid(ids.v1) } });
+  t("newRequests = open requests without my offer", sm.newRequests === open && open >= 1, `${sm.newRequests} vs ${open}`);
+  r = await C.buyer.req("GET", "/api/vendor/summary");
+  t("…vendors only", r.status === 403);
+
+  // Rate limits: own allowance for browsing, per account when signed in
+  const crowd = new Client();
+  let last;
+  for (let i = 0; i < 151; i++) last = await crowd.req("GET", "/api/order-requests/options");
+  t("general limit → 429 with Retry-After", last.status === 429 && Number(last.headers.get("retry-after")) > 0, `${last.status} ${last.headers.get("retry-after")}`);
+  r = await crowd.req("GET", "/api/products?limit=1");
+  t("browsing has its own allowance", r.status === 200 && r.headers.get("ratelimit-limit") === "1000", `${r.status} ${r.headers.get("ratelimit-limit")}`);
+  const sameIp = new Client();
+  await sameIp.req("POST", "/api/auth/login", { email: "rater@t.com", password: "password123" });
+  sameIp.ip = crowd.ip; // signed in elsewhere, now behind the busy IP
+  r = await sameIp.req("GET", "/api/order-requests/options");
+  t("a signed-in user on the same IP isn't blocked", r.status === 200, r.status);
+});
+
 (async () => {
   const mongo = await MongoMemoryServer.create();
   const uri = mongo.getUri("technest_test");

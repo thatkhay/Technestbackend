@@ -24,6 +24,12 @@ globalThis.fetch = async (url, opts = {}) => {
     if (process.env.WA_LOG) fs.appendFileSync(process.env.WA_LOG, JSON.stringify({ url: u, headers: opts.headers, body: JSON.parse(opts.body) }) + "\n");
     return new Response(JSON.stringify({ messages: [{ id: "wamid.reply" }] }), { status: 200 });
   }
+  // Cloudinary Admin API lookups of private uploads (utils/identity.js):
+  // public ids containing "pdf" are PDFs, "missing" → 404, the rest JPEGs
+  if (u.startsWith("https://api.cloudinary.com/") && u.includes("/resources/image/authenticated/")) {
+    if (u.includes("missing")) return new Response(JSON.stringify({ error: { message: "not found" } }), { status: 404 });
+    return new Response(JSON.stringify({ format: u.includes("pdf") ? "pdf" : "jpg" }), { status: 200 });
+  }
   // Tests may only talk to the local server; anything else is a bug
   const host = new URL(u).hostname;
   if (host === "localhost" || host === "127.0.0.1") return realFetch(url, opts);

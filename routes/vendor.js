@@ -3,6 +3,8 @@ const Listing = require("../models/Listing");
 const User = require("../models/User");
 const DeviceRequest = require("../models/DeviceRequest");
 const InventoryItem = require("../models/Inventoryitem");
+const OrderRequest = require("../models/OrderRequest");
+const Notification = require("../models/Notification");
 const {
   protect,
   restrictTo,
@@ -139,6 +141,8 @@ router.patch("/verify", protect, verifyCsrfToken, requireVerified, async (req, r
     };
     if (cacCertificateId) req.user.vendorDocuments = { cacCertificateId };
     // vendorVerified intentionally left untouched here — admin approves separately
+    if (!req.user.vendorVerified)
+      req.user.vendorApplication = { status: "submitted", submittedAt: new Date(), reviewedAt: null, rejectionReason: null };
     await req.user.save();
 
     await notifyAdmins({
@@ -156,6 +160,7 @@ router.patch("/verify", protect, verifyCsrfToken, requireVerified, async (req, r
       createdAt: req.user.createdAt,
       vendorVerified: req.user.vendorVerified,
       vendorProfile: req.user.vendorProfile,
+      vendorApplication: req.user.vendorApplicationView(),
     });
   } catch (err) {
     next(err);
@@ -225,6 +230,55 @@ router.get(
     }
   }
 );
+
+/**
+ * @swagger
+ * /api/vendor/summary:
+ *   get:
+ *     summary: Counts for the home-page vendor card (light — no listings)
+ *     description: >
+ *       newRequests = open customer requests matched to you that you haven't
+ *       made an offer on yet. pendingOrders = requests you won that aren't
+ *       completed + WhatsApp orders for your listings that staff are still
+ *       handling (split in pendingOrdersBreakdown). unreadNotifications
+ *       counts the same notifications GET /api/notifications returns.
+ *       rating.average is null with no reviews.
+ *     tags: [Vendor]
+ *     security:
+ *       - cookieAuth: []
+ *     responses:
+ *       200:
+ *         description: "data: { newRequests, pendingOrders, pendingOrdersBreakdown: { wonRequests, listingOrders }, unreadNotifications, activeListings, rating: { average, count } }"
+ */
+router.get("/summary", protect, restrictTo("vendor"), requireVendorVerified, async (req, res, next) => {
+  try {
+    const me = req.user._id;
+    const myListings = await Listing.find({ owner: me }).distinct("_id");
+    const [newRequests, wonRequests, listingOrders, unreadNotifications, activeListings, ratings] = await Promise.all([
+      DeviceRequest.countDocuments({ matchedVendors: me, status: "open", expiresAt: { $gt: new Date() }, "offers.vendor": { $ne: me } }),
+      DeviceRequest.countDocuments({ acceptedVendor: me, status: "accepted" }),
+      myListings.length
+        ? OrderRequest.countDocuments({ kind: "listing", listing: { $in: myListings }, status: { $in: ["new", "in_progress"] } })
+        : 0,
+      Notification.countDocuments({
+        read: false,
+        $or: [{ recipientType: "all_users" }, { recipientType: "all_vendors" }, { recipientType: "specific", recipient: me }],
+      }),
+      Listing.countDocuments({ owner: me, status: "active" }),
+      ratingsFor([me]),
+    ]);
+    sendSuccess(res, 200, "Vendor summary fetched", {
+      newRequests,
+      pendingOrders: wonRequests + listingOrders,
+      pendingOrdersBreakdown: { wonRequests, listingOrders },
+      unreadNotifications,
+      activeListings,
+      rating: ratings.get(String(me)) || { average: null, count: 0 },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
 
 /**
  * @swagger

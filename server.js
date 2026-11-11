@@ -2,7 +2,8 @@ const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
 const cookieParser = require("cookie-parser");
-const rateLimit = require("express-rate-limit");
+const { rateLimit, ipKeyGenerator } = require("express-rate-limit");
+const jwt = require("jsonwebtoken");
 require("dotenv").config();
 
 const connectDB = require("./config/db");
@@ -164,15 +165,55 @@ app.use(express.json({ limit: "10kb" }));
 app.use(cookieParser());
 app.use(sanitizeRequest);
 
+// Rate limits count per account when signed in and per IP otherwise, so
+// people sharing a mobile carrier's IP (CGNAT — common in Nigeria) don't
+// use up each other's allowance. The token is only checked for a valid
+// signature here; protect() still does the full check. Every 429 carries
+// Retry-After (seconds) and RateLimit headers.
+const rateKey = (req) => {
+  const token = req.cookies?.accessToken;
+  if (token) {
+    try {
+      return `u:${jwt.verify(token, process.env.JWT_SECRET).id}`;
+    } catch {
+      // expired or invalid — count it against the IP
+    }
+  }
+  return ipKeyGenerator(req.ip);
+};
+const tooMany = (req, res) => sendError(res, 429, "Too many requests, slow down.");
+
+// Public catalog/marketplace reads get a much bigger allowance than the
+// rest of the API: a shopper paging through listings makes many requests.
+const BROWSE_PATHS = [
+  /^\/api\/listings(\/|$)/,
+  /^\/api\/products(\/|$)/,
+  /^\/api\/categories(\/|$)/,
+  /^\/api\/reviews\/(users|products)\//,
+  /^\/api\/vendors?\/directory$/,
+];
+const isBrowse = (req) => req.method === "GET" && BROWSE_PATHS.some((rx) => rx.test(req.originalUrl.split("?")[0]));
+
+const browseLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 1000,
+  standardHeaders: "draft-6",
+  keyGenerator: rateKey,
+  skip: (req) => !isBrowse(req),
+  handler: tooMany,
+});
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 100,
-  handler: (req, res) => sendError(res, 429, "Too many requests, slow down."),
+  limit: 150,
+  standardHeaders: "draft-6",
+  keyGenerator: rateKey,
+  skip: isBrowse,
+  handler: tooMany,
 });
 // Health first: monitors must always get an answer, even when rate-limited
 // or the database is down
 app.use("/api/health", healthRoutes);
-app.use("/api/", limiter);
+app.use("/api/", browseLimiter, limiter);
 // Answer straight away while the database is unreachable (docs still load)
 app.use("/api", (req, res, next) => (req.path.startsWith("/docs") ? next() : requireDatabase(req, res, next)));
 // Records every successful admin change (who, what, when) — see /api/admin/audit

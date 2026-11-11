@@ -131,7 +131,93 @@ These Next.js routes talk to MongoDB directly. They don't work on Vercel
 - **Removed:** `/api/gadgets`, `/api/prices`, `/api/devices`,
   `/api/recommendations` — unused by the frontend.
 
-## 7. Testing tips
+## 7. Mobile UI requests (answers to `mobile-ui-checklist.html`)
+
+Items 1–8 are done; 9 (web push) isn't built yet. Every new field is
+optional, so these can be picked up in any order.
+
+### 🔴 1. Product ratings
+
+- Every product from `GET /api/products`, `/products/{id}`,
+  `/products/search` and `/products/flash-sale` has
+  `rating: { average, count }`, or `null` when nobody has rated it.
+  `average` has one decimal place.
+- **Rule:** ratings come from buyers of completed catalog orders — online
+  orders once paid and delivered, WhatsApp orders once staff complete them.
+  One rating per product per order, within 30 days.
+- **Asking buyers to rate:** `GET /api/reviews/pending` now also returns
+  product deals: `{ type: "order" | "order_request", id, product: { id, name, image }, label }`.
+- **Submitting:** `POST /api/reviews { source: { type, id, productId: product.id }, rating, comment }`.
+- **Product page:** `GET /api/reviews/products/{slug}` →
+  `{ average, count, stars, reviews, page, pages }`.
+- **Sort:** `?sort=rating` on `GET /api/products`.
+
+### 🔴 2. Product images
+
+- `image` is now returned for gadgets too (it used to be phones only), plus
+  optional `images: string[]` for extra photos.
+- Photos appear once admins add them (`PATCH /api/products/{slug}` or the
+  `image` / `images` CSV columns) — most products have none yet.
+- No `imageWidth` / `imageHeight`: images are on Cloudinary, so use a fixed
+  aspect-ratio box plus a Cloudinary resize (e.g. `c_fill,w_400,ar_1:1`).
+
+### 🔴 3. Admin document review
+
+- `GET /api/admin/vendors/pending`: each vendor now has `cacCertificateMime`
+  and `identity: { status, idType, fullName, nameMatch, submittedAt, idDocumentUrl, idDocumentMime, selfieUrl, selfieMime, … }`
+  (`identity` is `null` if they never did the identity check).
+- New `GET /api/admin/identity/{userId}` → same shape as one item of `people`.
+- Mime values look like `"application/pdf"` / `"image/jpeg"`, or `null` when
+  unknown — keep the URL guess as a fallback.
+- Signed links don't expire, so they won't run out during a review.
+
+### 🟡 4. Rate limiting
+
+- Public GET browsing (`/api/listings*`, `/api/products*`,
+  `/api/categories*`, public reviews, vendor directory) has its own
+  allowance: 1,000 requests per 15 minutes. Everything else: 150.
+- Signed-in users are counted per account, not per IP, so people sharing a
+  carrier IP don't block each other.
+- Every 429 has `Retry-After` (seconds) plus `RateLimit-*` headers.
+
+### 🟡 5. Vendor summary
+
+- `GET /api/vendor/summary` (verified vendors) →
+  `{ newRequests, pendingOrders, pendingOrdersBreakdown: { wonRequests, listingOrders }, unreadNotifications, activeListings, rating: { average, count } }`.
+- `newRequests` = open matched requests they haven't offered on yet.
+- `pendingOrders` = requests they won that aren't completed + WhatsApp
+  orders for their listings that staff are still handling.
+
+### 🟡 6. Vendor application status
+
+- `GET /api/me` (and the `PATCH /api/vendor/verify` response) include
+  `vendorApplication: { status: "not_started" | "submitted" | "approved" | "rejected", submittedAt, reviewedAt, rejectionReason }`.
+  Use it instead of checking `vendorProfile.phone`.
+- Rejecting still clears the profile, but `status: "rejected"` and the
+  reason stay until the vendor resubmits.
+
+### 🟡 7. Catalog paging and sorting
+
+- Already worked: `page`, `limit` (max 200), `total`, `pages`, `q`,
+  `brand`, `sort=price-asc|price-desc`.
+- New: `sort=newest`, `sort=rating`, `storage=256GB`, `color=Onyx Black`
+  (case-insensitive; comma-separated = any of). Add `condition=brand-new`
+  so price sorting uses the brand-new price.
+
+### ⚪ 8. Flash sale extras
+
+- `upcoming[].sale.priceUkUsed` / `priceBrandNew` are returned whenever the
+  admin set them — usable now.
+- New: when an admin caps a sale, `sale.stockLimit` and `sale.sold` are
+  included (progress bar = `sold / stockLimit`). At the cap the sale ends
+  (`active: false`) and leaves the flash-sale page. Ordering more than are
+  left at the sale price → 409 with a message you can show as-is.
+
+### ⚪ 9. Web push
+
+Not built yet. Tell us if the site becomes installable.
+
+## 8. Testing tips
 
 - In the docs, log in with `POST /api/auth/login` → **Try it out**; the
   session cookies are set for you. For POST / PATCH / DELETE, click

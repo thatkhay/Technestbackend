@@ -26,6 +26,12 @@ const ProductSchema = new mongoose.Schema(
     category: { type: String, required: true, trim: true, maxlength: 50 },
 
     image: { type: String, trim: true, maxlength: 500, default: null },
+    // Extra photos (gallery); `image` stays the main one
+    images: {
+      type: [{ type: String, trim: true, maxlength: 500 }],
+      default: [],
+      validate: { validator: (v) => v.length <= 10, message: "At most 10 images" },
+    },
     storage: { type: [String], default: [] },
     colors: { type: [String], default: [] },
     ram: { type: String, trim: true, maxlength: 30, default: null },
@@ -50,6 +56,11 @@ const ProductSchema = new mongoose.Schema(
         startsAt: { type: Date, required: true },
         endsAt: { type: Date, required: true },
         label: { type: String, trim: true, maxlength: 30, default: "Flash Sale" },
+        // Optional cap on units sold at the sale price; null = no cap.
+        // sold counts paid/completed sales made during the sale window
+        // (utils/stock.js recordSaleUnits). The sale ends when sold reaches it.
+        stockLimit: { type: Number, min: 1, default: null },
+        sold: { type: Number, min: 0, default: 0 },
       },
       default: null,
     },
@@ -61,6 +72,13 @@ const ProductSchema = new mongoose.Schema(
     // Soft-delete: hidden from the catalog but kept so old orders (and
     // "buy again") can still resolve the slug to a name.
     isActive: { type: Boolean, default: true },
+
+    // Buyer ratings from completed catalog orders (utils/reviews.js keeps
+    // this in step with the visible reviews)
+    rating: {
+      average: { type: Number, min: 0, max: 5, default: null },
+      count: { type: Number, min: 0, default: 0 },
+    },
   },
   { timestamps: true }
 );
@@ -68,6 +86,7 @@ const ProductSchema = new mongoose.Schema(
 ProductSchema.index({ type: 1, category: 1, isActive: 1 });
 ProductSchema.index({ name: "text", brand: "text", tags: "text" });
 ProductSchema.index({ "sale.endsAt": 1, "sale.startsAt": 1 });
+ProductSchema.index({ isActive: 1, createdAt: -1 });
 
 // A counted product is in stock exactly while it has units left
 ProductSchema.pre("save", function () {
@@ -76,7 +95,19 @@ ProductSchema.pre("save", function () {
 
 ProductSchema.methods.saleActive = function (now = new Date()) {
   const s = this.sale;
-  return !!(s && s.startsAt <= now && s.endsAt > now && (s.priceUkUsed || s.priceBrandNew));
+  return !!(
+    s &&
+    s.startsAt <= now &&
+    s.endsAt > now &&
+    (s.priceUkUsed || s.priceBrandNew) &&
+    !(s.stockLimit && (s.sold || 0) >= s.stockLimit)
+  );
+};
+
+/** Units still available at the sale price, or null when uncapped. */
+ProductSchema.methods.saleUnitsLeft = function () {
+  const s = this.sale;
+  return s && s.stockLimit ? Math.max(0, s.stockLimit - (s.sold || 0)) : null;
 };
 
 // Everything that charges or quotes a price goes through here, so a live
@@ -107,6 +138,10 @@ ProductSchema.methods.toClient = function () {
     stockQuantity: this.stockQuantity ?? undefined,
     lowStock: this.stockQuantity != null && this.stockQuantity > 0 && this.stockQuantity <= 5 ? true : undefined,
     isActive: this.isActive,
+    image: this.image || undefined,
+    images: this.images?.length ? this.images : undefined,
+    // null until someone has rated it
+    rating: this.rating?.count ? { average: this.rating.average, count: this.rating.count } : null,
     attributes: this.attributes && Object.keys(this.attributes).length ? this.attributes : undefined,
     // Show the base price struck through next to the sale price while active
     sale: this.sale
@@ -117,6 +152,9 @@ ProductSchema.methods.toClient = function () {
           startsAt: this.sale.startsAt.toISOString(),
           endsAt: this.sale.endsAt.toISOString(),
           label: this.sale.label,
+          // Only when the admin capped the sale: "70% claimed" bars
+          stockLimit: this.sale.stockLimit || undefined,
+          sold: this.sale.stockLimit ? this.sale.sold || 0 : undefined,
         }
       : undefined,
   };
@@ -124,7 +162,6 @@ ProductSchema.methods.toClient = function () {
   if (this.type === "phone") {
     return {
       ...base,
-      image: this.image || undefined,
       storage: this.storage,
       ram: this.ram || undefined,
       category: this.category,

@@ -10,7 +10,7 @@ const { runListingChecks, findMarketDevice } = require("../utils/listingChecks")
 const ai = require("../utils/ai");
 const { learnTacFromListing } = require("../utils/imei");
 const { freshConfirmation } = require("../utils/listingExpiry");
-const { privateUrl } = require("../utils/identity");
+const { privateFile, identityForAdmin } = require("../utils/identity");
 const { protect, restrictTo } = require("../middleware/auth");
 const { verifyCsrfToken } = require("../middleware/csrf");
 const { sendSuccess, sendError } = require("../utils/response");
@@ -24,12 +24,18 @@ router.use(protect, restrictTo("admin"));
  * /api/admin/vendors/pending:
  *   get:
  *     summary: List vendors who submitted a profile but aren't verified yet
+ *     description: >
+ *       Each vendor carries everything the document review needs in one call:
+ *       cacCertificateUrl + cacCertificateMime, and identity (null if they
+ *       never did the identity check) with idDocumentUrl/idDocumentMime and
+ *       selfieUrl/selfieMime. Mime is e.g. application/pdf or image/jpeg, or
+ *       null when unknown. Signed links don't expire.
  *     tags: [Admin]
  *     security:
  *       - cookieAuth: []
  *     responses:
  *       200:
- *         description: Pending vendors fetched
+ *         description: "data.vendors: [{ _id, name, email, vendorProfile, vendorApplication, identityVerified, createdAt, cacCertificateUrl, cacCertificateMime, identity: { status, idType, fullName, nameMatch, submittedAt, idDocumentUrl, idDocumentMime, selfieUrl, selfieMime, ... } }]"
  *       403:
  *         description: Not permitted for this account type
  */
@@ -39,15 +45,21 @@ router.get("/vendors/pending", async (req, res, next) => {
       userType: "vendor",
       vendorVerified: false,
       "vendorProfile.phone": { $exists: true, $ne: null },
-    }).select("name email vendorProfile vendorDocuments identity.status identity.nameMatch identityVerified createdAt");
+    }).select("name email vendorProfile vendorDocuments vendorApplication identity identityVerified createdAt");
 
-    sendSuccess(res, 200, "Pending vendors fetched", {
-      vendors: pending.map((v) => ({
-        ...v.toObject(),
-        vendorDocuments: undefined,
-        cacCertificateUrl: privateUrl(v.vendorDocuments?.cacCertificateId),
-      })),
-    });
+    const vendors = await Promise.all(
+      pending.map(async (v) => {
+        const [cac, identity] = await Promise.all([privateFile(v.vendorDocuments?.cacCertificateId), identityForAdmin(v.identity)]);
+        return {
+          ...v.toObject(),
+          vendorDocuments: undefined,
+          cacCertificateUrl: cac.url,
+          cacCertificateMime: cac.mime,
+          identity,
+        };
+      })
+    );
+    sendSuccess(res, 200, "Pending vendors fetched", { vendors });
   } catch (err) {
     next(err);
   }
@@ -105,6 +117,12 @@ router.patch(
         return sendError(res, 404, "Vendor not found");
 
       vendor.vendorVerified = true;
+      vendor.vendorApplication = {
+        ...(vendor.vendorApplication?.toObject?.() || {}),
+        status: "approved",
+        reviewedAt: new Date(),
+        rejectionReason: null,
+      };
       await vendor.save();
 
       await notify({
@@ -131,6 +149,7 @@ router.patch(
  * /api/admin/vendors/{id}/reject:
  *   patch:
  *     summary: Reject a pending vendor and clear their profile
+ *     description: The reason is sent to the vendor and shown in GET /api/me → vendorApplication.rejectionReason.
  *     tags: [Admin]
  *     security:
  *       - cookieAuth: []
@@ -139,6 +158,13 @@ router.patch(
  *         name: id
  *         required: true
  *         schema: { type: string }
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               reason: { type: string, maxLength: 300 }
  *     responses:
  *       200:
  *         description: Vendor rejected
@@ -151,11 +177,18 @@ router.patch("/vendors/:id/reject", verifyCsrfToken, async (req, res, next) => {
     if (!vendor || vendor.userType !== "vendor")
       return sendError(res, 404, "Vendor not found");
 
+    const reason = typeof req.body?.reason === "string" ? req.body.reason.trim() : "";
     vendor.vendorVerified = false;
     vendor.vendorProfile = undefined; // clear so they must resubmit
+    // Kept so GET /api/me can tell them it was rejected and why
+    vendor.vendorApplication = {
+      submittedAt: vendor.vendorApplication?.submittedAt || null,
+      status: "rejected",
+      reviewedAt: new Date(),
+      rejectionReason: reason.slice(0, 300) || null,
+    };
     await vendor.save();
 
-    const reason = typeof req.body?.reason === "string" ? req.body.reason.trim() : "";
     await notify({
       recipient: vendor._id,
       type: "account_update",

@@ -86,6 +86,7 @@ router.get("/", protect, (req, res) => {
     createdAt: req.user.createdAt,
     vendorVerified: req.user.vendorVerified,
     vendorProfile: req.user.vendorProfile,
+    vendorApplication: req.user.vendorApplicationView(),
     identityVerified: req.user.identityVerified,
     identityStatus: req.user.identity?.status || "none",
     phone: req.user.phone,
@@ -155,7 +156,7 @@ router.delete("/", protect, verifyCsrfToken, sensitiveLimiter, async (req, res, 
       deletedAt: new Date(),
       tokenVersion: (user.tokenVersion || 0) + 1,
     });
-    for (const f of ["phoneVerification", "identity", "vendorProfile", "vendorDocuments", "verificationToken", "verificationTokenExpires", "passwordResetToken", "passwordResetExpires"])
+    for (const f of ["phoneVerification", "identity", "vendorProfile", "vendorApplication", "vendorDocuments", "verificationToken", "verificationTokenExpires", "passwordResetToken", "passwordResetExpires"])
       user.set(f, undefined);
     await user.save();
 

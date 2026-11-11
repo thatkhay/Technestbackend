@@ -32,10 +32,72 @@ const isOwnPrivateUpload = (publicId, userId) =>
   typeof publicId === "string" &&
   new RegExp(`^technest/private/${userId}/[\\w-]+$`).test(publicId);
 
-/** Signed link for admins to view a private upload. */
-const privateUrl = (publicId) =>
+/**
+ * Signed link for admins to view a private upload. Cloudinary signed
+ * delivery links don't expire, so they stay valid through a long review.
+ * With a known format the link ends in .pdf / .jpg.
+ */
+const privateUrl = (publicId, format) =>
   publicId
-    ? cloudinary.url(publicId, { type: "authenticated", sign_url: true, secure: true })
+    ? cloudinary.url(publicId, { type: "authenticated", sign_url: true, secure: true, ...(format ? { format } : {}) })
     : null;
 
-module.exports = { ID_TYPES, compareNames, isOwnPrivateUpload, privateUrl };
+const MIME = { pdf: "application/pdf", jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp", heic: "image/heic", heif: "image/heif", gif: "image/gif" };
+
+// Uploaded files never change, so a lookup is cached for the process's life
+const formatCache = new Map();
+
+/**
+ * The file format of a private upload ("pdf", "jpg", ...) from Cloudinary's
+ * Admin API, or null if it can't be found out. Never throws.
+ */
+const privateFormat = async (publicId) => {
+  if (!publicId) return null;
+  if (formatCache.has(publicId)) return formatCache.get(publicId);
+  try {
+    const { cloud_name, api_key, api_secret } = cloudinary.config();
+    const res = await fetch(
+      `https://api.cloudinary.com/v1_1/${cloud_name}/resources/image/authenticated/${publicId.split("/").map(encodeURIComponent).join("/")}`,
+      {
+        headers: { Authorization: `Basic ${Buffer.from(`${api_key}:${api_secret}`).toString("base64")}` },
+        signal: AbortSignal.timeout(4000),
+      }
+    );
+    if (!res.ok) return null; // not cached: may be a passing outage
+    const format = String((await res.json()).format || "").toLowerCase() || null;
+    if (formatCache.size > 5000) formatCache.delete(formatCache.keys().next().value);
+    formatCache.set(publicId, format);
+    return format;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Link and file type for an admin document viewer.
+ * @returns {Promise<{ url: string|null, mime: string|null }>} mime null = unknown (guess from the URL)
+ */
+const privateFile = async (publicId) => {
+  if (!publicId) return { url: null, mime: null };
+  const format = await privateFormat(publicId);
+  return { url: privateUrl(publicId, format), mime: format ? MIME[format] || `image/${format}` : null };
+};
+
+/**
+ * A user's identity check as admins see it, with signed links and file
+ * types for the ID photo and selfie. Bank code and raw upload ids left out.
+ */
+const identityForAdmin = async (identity) => {
+  if (!identity || !identity.status || identity.status === "none") return null;
+  const { idDocumentId, selfieId, bankCode, ...rest } = identity.toObject ? identity.toObject() : identity;
+  const [idDoc, selfie] = await Promise.all([privateFile(idDocumentId), privateFile(selfieId)]);
+  return {
+    ...rest,
+    idDocumentUrl: idDoc.url,
+    idDocumentMime: idDoc.mime,
+    selfieUrl: selfie.url,
+    selfieMime: selfie.mime,
+  };
+};
+
+module.exports = { ID_TYPES, compareNames, isOwnPrivateUpload, privateUrl, privateFile, identityForAdmin };

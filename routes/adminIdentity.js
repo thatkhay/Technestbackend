@@ -4,7 +4,7 @@ const User = require("../models/User");
 const { protect, restrictTo } = require("../middleware/auth");
 const { verifyCsrfToken } = require("../middleware/csrf");
 const { sendSuccess, sendError } = require("../utils/response");
-const { privateUrl } = require("../utils/identity");
+const { identityForAdmin } = require("../utils/identity");
 const { notify } = require("../utils/notify");
 const router = express.Router();
 
@@ -24,7 +24,7 @@ router.use(protect, restrictTo("admin"));
  *         schema: { type: string, enum: [pending, verified, rejected], default: pending }
  *     responses:
  *       200:
- *         description: "data.people: [{ userId, name, email, userType, identity: { fullName, idType, bankName, accountLast4, accountName, nameMatch, submittedAt, idDocumentUrl, selfieUrl } }]"
+ *         description: "data.people: [{ userId, name, email, userType, identity: { status, fullName, idType, bankName, accountLast4, accountName, nameMatch, submittedAt, idDocumentUrl, idDocumentMime, selfieUrl, selfieMime } }] — *Mime is e.g. application/pdf or image/jpeg, null if unknown"
  */
 router.get("/", async (req, res, next) => {
   try {
@@ -33,19 +33,47 @@ router.get("/", async (req, res, next) => {
       .select("name email userType identity createdAt")
       .sort({ "identity.submittedAt": 1 })
       .limit(200);
-    sendSuccess(res, 200, "Identity checks fetched", {
-      people: users.map((u) => {
-        const { idDocumentId, selfieId, bankCode, ...rest } = u.identity.toObject();
-        return {
-          userId: u._id,
-          name: u.name,
-          email: u.email,
-          userType: u.userType,
-          memberSince: u.createdAt,
-          identity: { ...rest, idDocumentUrl: privateUrl(idDocumentId), selfieUrl: privateUrl(selfieId) },
-        };
-      }),
-    });
+    sendSuccess(res, 200, "Identity checks fetched", { people: await Promise.all(users.map(personView)) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+const personView = async (u) => ({
+  userId: u._id,
+  name: u.name,
+  email: u.email,
+  userType: u.userType,
+  memberSince: u.createdAt,
+  identity: await identityForAdmin(u.identity),
+});
+
+/**
+ * @swagger
+ * /api/admin/identity/{userId}:
+ *   get:
+ *     summary: One user's identity check (same shape as an item of people)
+ *     description: identity is null when the user never submitted one.
+ *     tags: [Admin — Identity]
+ *     security:
+ *       - cookieAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: userId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: "data: { userId, name, email, userType, memberSince, identity }"
+ *       404:
+ *         description: User not found
+ */
+router.get("/:userId", async (req, res, next) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.userId)) return sendError(res, 404, "User not found");
+    const user = await User.findById(req.params.userId).select("name email userType identity createdAt");
+    if (!user) return sendError(res, 404, "User not found");
+    sendSuccess(res, 200, "Identity check fetched", await personView(user));
   } catch (err) {
     next(err);
   }

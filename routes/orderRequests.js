@@ -160,9 +160,9 @@ router.post("/", requestLimiter, optionalAuth, verifyCsrfIfAuthenticated, async 
         if (!product.inStock) return sendError(res, 409, `${product.name} is out of stock.`);
         const quantity = Number.isInteger(line.quantity) ? line.quantity : 1;
         if (quantity < 1 || quantity > 20) return sendError(res, 400, "Invalid quantity.");
-        const short = stockProblem(product, quantity);
-        if (short) return sendError(res, 409, short);
         const condition = line.condition === "brand-new" ? "brand-new" : "uk-used";
+        const short = stockProblem(product, quantity, condition);
+        if (short) return sendError(res, 409, short);
         lines.push({
           itemType: "product",
           itemId: product.slug,

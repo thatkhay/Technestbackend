@@ -56,8 +56,16 @@ const findProduct = (idOrSlug) => {
  *         description: Search name / brand
  *         schema: { type: string }
  *       - in: query
+ *         name: storage
+ *         description: "Storage option, e.g. 256GB (comma-separated = any of)"
+ *         schema: { type: string }
+ *       - in: query
+ *         name: color
+ *         description: "Colour, case-insensitive (comma-separated = any of)"
+ *         schema: { type: string }
+ *       - in: query
  *         name: sort
- *         schema: { type: string, enum: [default, price-asc, price-desc] }
+ *         schema: { type: string, enum: [default, price-asc, price-desc, newest, rating] }
  *       - in: query
  *         name: condition
  *         description: Which price to sort by
@@ -74,7 +82,7 @@ const findProduct = (idOrSlug) => {
  */
 router.get("/", async (req, res, next) => {
   try {
-    const { type, category, brand, q, sort, condition } = req.query;
+    const { type, category, brand, q, sort, condition, storage, color } = req.query;
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const limit = Math.min(200, Math.max(1, parseInt(req.query.limit) || 100));
 
@@ -94,10 +102,24 @@ router.get("/", async (req, res, next) => {
       filter[priceField] = { ...(minPrice > 0 ? { $gte: minPrice } : {}), ...(maxPrice > 0 ? { $lte: maxPrice } : {}) };
     if (req.query.onSale === "true") {
       const now = new Date();
-      Object.assign(filter, { "sale.startsAt": { $lte: now }, "sale.endsAt": { $gt: now } });
+      Object.assign(filter, {
+        "sale.startsAt": { $lte: now },
+        "sale.endsAt": { $gt: now },
+        $expr: { $or: [{ $not: ["$sale.stockLimit"] }, { $lt: ["$sale.sold", "$sale.stockLimit"] }] },
+      });
     }
     if (typeof brand === "string" && brand && brand !== "all")
       filter.brand = new RegExp(`^${escapeRegex(brand)}$`, "i");
+    // "256GB,512GB" = any of; matched exactly but ignoring case and spaces
+    const anyOf = (v) =>
+      typeof v === "string" && v.trim()
+        ? v.split(",").map((x) => x.trim()).filter(Boolean).slice(0, 10)
+            .map((x) => new RegExp(`^${escapeRegex(x).replace(/\s+/g, "\\s*")}$`, "i"))
+        : null;
+    const storages = anyOf(storage);
+    if (storages) filter.storage = { $in: storages };
+    const colors = anyOf(color);
+    if (colors) filter.colors = { $in: colors };
     if (typeof q === "string" && q.trim()) {
       const rx = new RegExp(escapeRegex(q.trim().slice(0, 100)), "i");
       filter.$or = [{ name: rx }, { brand: rx }, { tags: rx }];
@@ -105,10 +127,14 @@ router.get("/", async (req, res, next) => {
 
     const sortSpec =
       sort === "price-asc"
-        ? { [priceField]: 1 }
+        ? { [priceField]: 1, _id: 1 }
         : sort === "price-desc"
-        ? { [priceField]: -1 }
-        : { type: 1, createdAt: 1 };
+        ? { [priceField]: -1, _id: 1 }
+        : sort === "newest"
+        ? { createdAt: -1, _id: -1 }
+        : sort === "rating"
+        ? { "rating.average": -1, "rating.count": -1, _id: 1 }
+        : { type: 1, createdAt: 1, _id: 1 };
 
     const [products, total] = await Promise.all([
       Product.find(filter)
@@ -309,6 +335,7 @@ const EDITABLE_FIELDS = [
   "brand",
   "category",
   "image",
+  "images",
   "storage",
   "colors",
   "ram",
@@ -338,7 +365,7 @@ const pickEditable = (body) => {
  * Checks a sale against the product's normal prices.
  * @returns {{ sale }} normalized (null = no sale) or {{ error }}
  */
-const validateSale = (sale, { priceUkUsed, priceBrandNew }) => {
+const validateSale = (sale, { priceUkUsed, priceBrandNew }, currentSale = null) => {
   if (sale === null) return { sale: null };
   if (typeof sale !== "object") return { error: "sale must be an object or null" };
   const startsAt = sale.startsAt ? new Date(sale.startsAt) : new Date();
@@ -351,7 +378,14 @@ const validateSale = (sale, { priceUkUsed, priceBrandNew }) => {
   if (!uk && !bn) return { error: "Give a sale price for UK used and/or brand new" };
   if ((uk !== null && !(uk > 0 && uk < priceUkUsed)) || (bn !== null && !(bn > 0 && bn < priceBrandNew)))
     return { error: "Sale prices must be above 0 and below the normal price" };
-  return { sale: { priceUkUsed: uk, priceBrandNew: bn, startsAt, endsAt, label: String(sale.label || "Flash Sale").slice(0, 30) } };
+  const limit = sale.stockLimit === undefined || sale.stockLimit === null || sale.stockLimit === "" ? null : Number(sale.stockLimit);
+  if (limit !== null && !(Number.isInteger(limit) && limit >= 1))
+    return { error: "stockLimit must be a whole number of units (or null for no limit)" };
+  // Editing the same sale (same start) keeps its count of units sold
+  const sold = currentSale && +currentSale.startsAt === +startsAt ? currentSale.sold || 0 : 0;
+  return {
+    sale: { priceUkUsed: uk, priceBrandNew: bn, startsAt, endsAt, label: String(sale.label || "Flash Sale").slice(0, 30), stockLimit: limit, sold },
+  };
 };
 
 // Category must exist, attributes must fit it, and a sale must undercut the
@@ -372,10 +406,14 @@ const checkProductFields = async (fields, current = null) => {
     fields.attributes = checked.attributes;
   }
   if (fields.sale !== undefined) {
-    const checked = validateSale(fields.sale, {
-      priceUkUsed: fields.priceUkUsed ?? current?.priceUkUsed,
-      priceBrandNew: fields.priceBrandNew ?? current?.priceBrandNew,
-    });
+    const checked = validateSale(
+      fields.sale,
+      {
+        priceUkUsed: fields.priceUkUsed ?? current?.priceUkUsed,
+        priceBrandNew: fields.priceBrandNew ?? current?.priceBrandNew,
+      },
+      current?.sale
+    );
     if (checked.error) return { error: checked.error };
     fields.sale = checked.sale;
   }
@@ -385,7 +423,7 @@ const checkProductFields = async (fields, current = null) => {
 const slugify = (s) =>
   String(s || "").toLowerCase().replace(/\+/g, " plus ").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 100);
 
-const PRODUCT_COLUMNS = new Set(["slug", "type", "name", "brand", "category", "priceukused", "pricebrandnew", "storage", "colors", "ram", "spec", "badge", "tags", "image", "instock", "stock"]);
+const PRODUCT_COLUMNS = new Set(["slug", "type", "name", "brand", "category", "priceukused", "pricebrandnew", "storage", "colors", "ram", "spec", "badge", "tags", "image", "images", "instock", "stock"]);
 
 /**
  * @swagger
@@ -395,8 +433,8 @@ const PRODUCT_COLUMNS = new Set(["slug", "type", "name", "brand", "category", "p
  *     description: >
  *       Header row required. Columns: slug (optional — made from the name),
  *       type (phone | gadget), name, brand, category (slug),
- *       priceUkUsed, priceBrandNew, storage / colors / tags (separate values
- *       with |), ram, spec, badge, image, inStock (yes/no), stock (units on
+ *       priceUkUsed, priceBrandNew, storage / colors / tags / images (separate
+ *       values with |), ram, spec, badge, image, inStock (yes/no), stock (units on
  *       hand — leave blank not to count). Any other column
  *       is read as a filter for that row's category, e.g. connectivity,
  *       noiseCancelling. Rows whose slug exists are updated (blank cells are
@@ -445,7 +483,8 @@ router.post("/bulk", protect, restrictTo("admin"), verifyCsrfToken, async (req, 
       if (v.category) fields.category = v.category.toLowerCase();
       for (const [col, f] of [["priceukused", "priceUkUsed"], ["pricebrandnew", "priceBrandNew"]])
         if (v[col]) fields[f] = Number(String(v[col]).replace(/[₦,\s]/g, ""));
-      for (const [col, f] of [["storage", "storage"], ["colors", "colors"], ["tags", "tags"]]) if (v[col]) fields[f] = splitList(v[col]);
+      for (const [col, f] of [["storage", "storage"], ["colors", "colors"], ["tags", "tags"], ["images", "images"]]) if (v[col]) fields[f] = splitList(v[col]);
+      if (fields.images && fields.images.length > 10) { fail("At most 10 images"); continue; }
       if (v.instock) fields.inStock = parseBool(v.instock);
       // bulkWrite skips the model's save hook, so keep inStock in step here
       if (v.stock !== undefined && v.stock !== "") {
@@ -521,6 +560,7 @@ router.post("/bulk", protect, restrictTo("admin"), verifyCsrfToken, async (req, 
  *               startsAt: { type: string, format: date-time, description: "Default: now" }
  *               endsAt: { type: string, format: date-time }
  *               label: { type: string, example: Flash Sale }
+ *               stockLimit: { type: integer, description: "Optional: units per product at the sale price; the sale ends when they're sold" }
  *     responses:
  *       200:
  *         description: "data: { updated, notFound }"
@@ -550,8 +590,9 @@ router.post("/flash-sale", protect, restrictTo("admin"), verifyCsrfToken, async 
     const round = (n) => Math.max(100, Math.round(n / 100) * 100);
     for (const p of products) {
       const checked = validateSale(
-        { priceUkUsed: round(p.priceUkUsed * (1 - pct / 100)), priceBrandNew: round(p.priceBrandNew * (1 - pct / 100)), startsAt: req.body.startsAt, endsAt: req.body.endsAt, label: req.body.label },
-        p
+        { priceUkUsed: round(p.priceUkUsed * (1 - pct / 100)), priceBrandNew: round(p.priceBrandNew * (1 - pct / 100)), startsAt: req.body.startsAt, endsAt: req.body.endsAt, label: req.body.label, stockLimit: req.body.stockLimit },
+        p,
+        p.sale
       );
       if (checked.error) return sendError(res, 400, `${p.name}: ${checked.error}`);
       p.sale = checked.sale;
@@ -595,7 +636,8 @@ router.delete("/flash-sale", protect, restrictTo("admin"), verifyCsrfToken, asyn
  *               name: { type: string }
  *               brand: { type: string }
  *               category: { type: string }
- *               image: { type: string }
+ *               image: { type: string, description: "Main photo URL (Cloudinary preferred)" }
+ *               images: { type: array, items: { type: string }, description: "Extra photos, up to 10" }
  *               storage: { type: array, items: { type: string } }
  *               colors: { type: array, items: { type: string } }
  *               ram: { type: string }
